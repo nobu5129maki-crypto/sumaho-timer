@@ -35,6 +35,7 @@ const el = {
   metaLine: $("metaLine"),
   ringProgress: $("ringProgress"),
   startBtn: $("startBtn"),
+  stopAlarmBtn: $("stopAlarmBtn"),
   runActions: $("runActions"),
   pauseBtn: $("pauseBtn"),
   endBtn: $("endBtn"),
@@ -117,6 +118,7 @@ const session = {
   pausedBlinkIn: 0,
   pausedPostureIn: 0,
   resumeAfter: false,
+  alarmSilenced: false,
 };
 const heat = { phase: "idle", endsAt: 0, duration: 5 * 60 * 1000 };
 
@@ -124,6 +126,7 @@ let view = "now";
 let tid = 0;
 let deadlineTimer = 0;
 let alarmTimer = 0;
+let vibeTimer = 0;
 let alarmNodes = [];
 let alarmHeard = false;
 let alarmAudio = null;
@@ -135,6 +138,8 @@ let endTimer = 0;
 let audioCtx = null;
 let wakeLock = null;
 let speakTimer = 0;
+let speakGen = 0;
+let speakQueue = [];
 let toastTimer = 0;
 let posturePending = false;
 let blinkCounted = false;
@@ -270,6 +275,12 @@ function ensureAlarmAudio() {
   alarmAudio.setAttribute("playsinline", "");
   alarmAudio.preload = "auto";
   document.body.appendChild(alarmAudio);
+  alarmAudio.addEventListener("ended", () => {
+    if (session.phase === "due" && !session.alarmSilenced && settings.sound) {
+      alarmAudio.loop = true;
+      alarmAudio.play().catch(() => {});
+    }
+  });
   return alarmAudio;
 }
 
@@ -334,9 +345,29 @@ function swPost(message) {
   else navigator.serviceWorker.ready.then(post).catch(() => {});
 }
 
+function stopVibeLoop() {
+  clearInterval(vibeTimer);
+  vibeTimer = 0;
+  if (navigator.vibrate) navigator.vibrate(0);
+}
+
+function startVibeLoop() {
+  if (vibeTimer || session.alarmSilenced || !settings.vibrate || !navigator.vibrate) return;
+  const pulse = () => {
+    if (session.phase !== "due" || session.alarmSilenced) {
+      stopVibeLoop();
+      return;
+    }
+    navigator.vibrate([450, 200, 450, 200, 450]);
+  };
+  pulse();
+  vibeTimer = setInterval(pulse, 1900);
+}
+
 function stopAlarm() {
   clearTimeout(alarmTimer);
   alarmTimer = 0;
+  stopVibeLoop();
   if (alarmAudio) {
     alarmAudio.pause();
     alarmAudio.loop = false;
@@ -349,6 +380,14 @@ function stopAlarm() {
     }
   }
   alarmNodes = [];
+}
+
+function silenceAlarm() {
+  session.alarmSilenced = true;
+  alarmHeard = true;
+  stopAlarm();
+  save();
+  render();
 }
 
 function playAlarmSound() {
@@ -365,10 +404,6 @@ function playAlarmSound() {
   } else {
     startAlarmLoop();
   }
-  clearTimeout(alarmTimer);
-  alarmTimer = setTimeout(() => {
-    if (alarmAudio && session.phase === "due") alarmAudio.loop = false;
-  }, 10000);
 }
 
 function alarmBurst() {
@@ -395,22 +430,20 @@ function alarmBurst() {
 }
 
 function startAlarmLoop() {
-  if (alarmHeard || !settings.sound) return;
-  stopAlarm();
-  let left = 6;
+  if (!settings.sound || session.alarmSilenced || (alarmAudio && !alarmAudio.paused)) return;
   const ring = () => {
-    if (session.phase !== "due") return;
-    if (alarmBurst()) alarmHeard = true;
-    left -= 1;
-    if (left > 0 && session.phase === "due") alarmTimer = setTimeout(ring, 2400);
+    if (session.phase !== "due" || session.alarmSilenced) return;
+    alarmBurst();
+    alarmTimer = setTimeout(ring, 1700);
   };
   ring();
 }
 
 function ringAlarm() {
-  buzz([200, 100, 200, 100, 200, 100, 420]);
+  if (session.alarmSilenced) return;
+  startVibeLoop();
   playAlarmSound();
-  ping(alarmLabel(), "6メートル先を、20秒。スタートを押してください。", "pinto-alarm");
+  ping(alarmLabel(), "ストップを押すまで、音は続きます。", "pinto-alarm");
 }
 
 function armClock() {
@@ -429,27 +462,58 @@ function armClock() {
 
 function hush() {
   clearTimeout(speakTimer);
+  speakGen += 1;
+  speakQueue = [];
   if ("speechSynthesis" in window) speechSynthesis.cancel();
 }
 
-function speak(text) {
-  if (!settings.speech || !("speechSynthesis" in window)) return;
-  try {
-    speechSynthesis.cancel();
-    const utter = new SpeechSynthesisUtterance(text);
-    utter.lang = "ja-JP";
-    utter.rate = 0.96;
-    const voice = speechSynthesis.getVoices().find((item) => item.lang && item.lang.startsWith("ja"));
-    if (voice) utter.voice = voice;
-    speechSynthesis.speak(utter);
-  } catch {
-    /* 読み上げ非対応でもタイマーは進める */
-  }
+function japaneseVoice() {
+  const voices = speechSynthesis.getVoices();
+  const ja = voices.filter((item) => /^ja/i.test(item.lang || ""));
+  return ja.find((item) => /kyoko|otoya|nanami|haruka/i.test(item.name)) || ja.find((item) => item.localService) || ja[0] || null;
 }
 
-function scheduleSpeak(text, delay) {
+function speakSequence(parts) {
+  if (!settings.speech || !("speechSynthesis" in window) || !parts.length) return;
+  hush();
+  const gen = speakGen;
+  speakQueue = parts.slice();
+  const next = () => {
+    if (gen !== speakGen) return;
+    const text = speakQueue.shift();
+    if (!text) return;
+    try {
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.lang = "ja-JP";
+      utter.rate = 0.88;
+      utter.pitch = 1;
+      const voice = japaneseVoice();
+      if (voice) utter.voice = voice;
+      let done = false;
+      const finish = () => {
+        if (done || gen !== speakGen) return;
+        done = true;
+        clearTimeout(watch);
+        speakTimer = setTimeout(next, 220);
+      };
+      const watch = setTimeout(finish, Math.max(1600, text.length * 320 + 700));
+      utter.onend = finish;
+      utter.onerror = finish;
+      speechSynthesis.speak(utter);
+    } catch {
+      /* 読み上げ非対応でもタイマーは進める */
+    }
+  };
+  const start = () => {
+    if (gen === speakGen) speakTimer = setTimeout(next, 80);
+  };
+  if (speechSynthesis.getVoices().length) start();
+  else speechSynthesis.addEventListener("voiceschanged", start, { once: true });
+}
+
+function scheduleLines(parts, delay) {
   clearTimeout(speakTimer);
-  speakTimer = setTimeout(() => speak(text), delay);
+  speakTimer = setTimeout(() => speakSequence(parts), delay);
 }
 
 function buzz(pattern) {
@@ -600,6 +664,7 @@ function startSession() {
   session.nextBlinkAt = now + blinkEvery();
   session.nextPostureAt = now + postureEvery();
   session.resumeAfter = false;
+  session.alarmSilenced = false;
   endArm = 0;
   alarmHeard = false;
   stopAlarm();
@@ -670,8 +735,13 @@ function beginLook() {
   if (!reduce && (settings.sound || settings.speech)) el.lookNum.classList.add("is-recede");
   if (settings.sound) chime("start");
   if (settings.speech) {
-    scheduleSpeak(
-      "画面から目を離して、6メートル先を20秒、ぼんやり見てください。終わりは音で知らせます。",
+    scheduleLines(
+      [
+        "画面から、目を離して。",
+        "6メートル先を、20秒。",
+        "ぼんやりと、見てください。",
+        "終わりは、音で知らせます。",
+      ],
       settings.sound ? 420 : 0
     );
   }
@@ -693,6 +763,7 @@ function enterDue() {
   closeTransient();
   save();
   swPost({ type: "disarm" });
+  session.alarmSilenced = false;
   alarmHeard = false;
   ringAlarm();
   render();
@@ -705,7 +776,9 @@ function completeLook(opts = {}) {
   if (!opts.quiet) {
     hush();
     if (settings.sound) chime("end");
-    if (settings.speech) scheduleSpeak("20秒たちました。目をほどきました。", settings.sound ? 360 : 0);
+    if (settings.speech) {
+      scheduleLines(["20秒、たちました。", "めを、ほどきました。"], settings.sound ? 360 : 0);
+    }
     buzz([20, 40, 20, 40, 80]);
   }
   syncWake();
@@ -750,7 +823,7 @@ function completeHeat(opts = {}) {
   const busy = session.phase === "look" || session.phase === "look-done";
   if (!opts.quiet && !busy) {
     if (settings.sound) chime("end");
-    if (settings.speech) scheduleSpeak("5分たちました。温熱ケアはここまでです。", settings.sound ? 360 : 0);
+    if (settings.speech) scheduleLines(["5分、たちました。", "温熱ケアは、ここまでです。"], settings.sound ? 360 : 0);
     buzz([20, 40, 80]);
   }
   syncWake();
@@ -875,11 +948,14 @@ function renderHero() {
     ratio = session.duration ? session.remain / session.duration : 0;
     status = "一時停止中です。";
   } else if (session.phase === "due") {
+    const ringing = !session.alarmSilenced;
     kicker = alarmLabel();
     time = "20";
-    sub = "スタートを押すと、はじまります";
+    sub = ringing ? "ストップを押すまで、鳴ります" : "スタートを押すと、はじまります";
     ratio = 1;
-    status = `${alarmLabel()}。スタートを押すと、6メートル先を20秒見ます。`;
+    status = ringing
+      ? `${alarmLabel()}。ストップを押すまで、音と振動は続きます。`
+      : `${alarmLabel()}。スタートを押すと、6メートル先を20秒見ます。`;
   } else if (settings.practice) {
     kicker = "練習";
     sub = "30秒で、アラームが鳴ります";
@@ -898,6 +974,8 @@ function renderHero() {
   el.hero.classList.toggle("is-idle", session.phase === "idle");
 
   const showStart = session.phase === "idle" || session.phase === "due";
+  const ringing = session.phase === "due" && !session.alarmSilenced;
+  el.stopAlarmBtn.hidden = !ringing;
   el.startBtn.hidden = !showStart;
   el.runActions.hidden = session.phase !== "working" && session.phase !== "paused";
   el.quickRow.hidden = session.phase === "due";
@@ -1171,7 +1249,7 @@ function bindSettings(input, key) {
 function reconcile() {
   const now = Date.now();
   if (session.phase === "working" && session.phaseEndsAt <= now) enterDue();
-  else if (session.phase === "due") ringAlarm();
+  else if (session.phase === "due" && !session.alarmSilenced) ringAlarm();
   if (session.phase === "look" && session.phaseEndsAt <= now) completeLook({ quiet: true });
   if (heat.phase === "run" && heat.endsAt <= now) completeHeat({ quiet: true });
 }
@@ -1179,7 +1257,10 @@ function reconcile() {
 function onVisible() {
   if (document.hidden) return;
   if (session.phase === "working" && Date.now() >= session.phaseEndsAt) enterDue();
-  else if (session.phase === "due") startAlarmLoop();
+  else if (session.phase === "due" && !session.alarmSilenced) {
+    if (!alarmAudio || alarmAudio.paused) playAlarmSound();
+    startVibeLoop();
+  }
   if (posturePending && session.phase === "working") openPosture();
   if (session.phase === "look" || heat.phase === "run") syncWake();
   tick();
@@ -1263,6 +1344,10 @@ function bind() {
     btn.addEventListener("click", () => showView(btn.dataset.view));
   });
   el.miniBar.addEventListener("click", () => showView("now"));
+  el.stopAlarmBtn.addEventListener("click", () => {
+    prime();
+    silenceAlarm();
+  });
   el.startBtn.addEventListener("click", () => {
     prime();
     if (session.phase === "due") beginLook();
