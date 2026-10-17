@@ -1,4 +1,4 @@
-const CACHE = "pinto-v9";
+const CACHE = "pinto-v10";
 const ASSETS = [
   "./",
   "./index.html",
@@ -101,18 +101,19 @@ function clearBookmark() {
 }
 
 function showAlarm(title, body, data) {
+  const seq = data && Number.isFinite(data.seq) ? data.seq : Date.now();
   const options = {
     body: body || "アプリを開くと、ストップまで音と振動が続きます。",
     icon: "./icon-192.png",
     badge: "./icon-192.png",
-    tag: "pinto-alarm",
+    tag: "pinto-alarm-" + seq,
     renotify: true,
     lang: "ja",
     silent: Boolean(data && data.sound === false),
     requireInteraction: true,
     data: { url: "./", id: data && data.id },
   };
-  if (!data || data.vibrate !== false) options.vibrate = [480, 160, 480, 160, 480, 160, 720];
+  if (!data || data.vibrate !== false) options.vibrate = [600, 200, 600, 200, 600, 200, 800];
   return self.registration.showNotification(title || "20分たちました", options);
 }
 
@@ -125,13 +126,9 @@ async function deliverPush(data) {
   } catch {
     failed = true;
   }
-  if (!failed && (!bookmark || bookmark.id !== data.id)) return;
+  if (!failed && bookmark && bookmark.id !== data.id) return;
   const open = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-  const visible = open.filter((client) => client.visibilityState === "visible");
-  if (visible.length) {
-    visible.forEach((client) => client.postMessage({ type: "due" }));
-    return;
-  }
+  open.forEach((client) => client.postMessage({ type: "due" }));
   await showAlarm(data.title, data.body, data);
 }
 

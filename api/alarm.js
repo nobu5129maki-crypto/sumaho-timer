@@ -105,28 +105,19 @@ function normalize(body, internal) {
   };
 }
 
-function hold(work) {
-  const ctx = globalThis[Symbol.for("@vercel/request-context")]?.get?.();
-  if (ctx && typeof ctx.waitUntil === "function") {
-    ctx.waitUntil(work);
-    return true;
-  }
-  return false;
-}
-
-async function sendPush(job) {
+async function sendPush(job, seq) {
   webpush.setVapidDetails("mailto:nobu5129maki@gmail.com", process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY);
   const payload = JSON.stringify({
     title: job.title,
     body: "アプリを開くと、ストップまで音と振動が続きます。",
     id: job.id,
+    seq,
     vibrate: job.vibrate,
     sound: job.sound,
   });
   await webpush.sendNotification(job.subscription, payload, {
-    TTL: 40,
+    TTL: 120,
     urgency: "high",
-    topic: "pinto-alarm",
   });
 }
 
@@ -145,39 +136,51 @@ async function chain(job) {
   };
   let lastStatus = 0;
   for (const url of urls) {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), 8000);
-      try {
-        const res = await fetch(url, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-pinto-chain": secret,
-          },
-          body: JSON.stringify(next),
-          signal: ac.signal,
-        });
-        lastStatus = res.status;
-        if (res.ok) return;
-      } catch {
-        lastStatus = 0;
-      } finally {
-        clearTimeout(timer);
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 25000);
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-pinto-chain": secret,
+        },
+        body: JSON.stringify(next),
+        signal: ac.signal,
+      });
+      lastStatus = res.status;
+      if (res.ok || res.status === 202) {
+        console.log("pinto chain handed off", job.hops + 1);
+        return;
       }
-      await sleep(1200);
+    } catch (error) {
+      if (error && error.name === "AbortError") {
+        console.log("pinto chain handed off", job.hops + 1);
+        return;
+      }
+      lastStatus = 0;
+    } finally {
+      clearTimeout(timer);
     }
   }
   throw new Error("chain " + lastStatus);
 }
 
 async function ring(job) {
+  let host = "unknown";
+  try {
+    host = new URL(job.subscription.endpoint).hostname;
+  } catch {
+    host = "unknown";
+  }
   for (let i = 0; i < RING_COUNT; i += 1) {
     try {
-      await sendPush(job);
+      await sendPush(job, i);
+      console.log("pinto sent", job.hops, i, host);
     } catch (error) {
       const code = error && error.statusCode;
-      if (code === 404 || code === 410) return;
+      console.log("pinto fail", job.hops, i, host, code || (error && error.message) || "error");
+      if (code === 404 || code === 410 || code === 400 || code === 401 || code === 403) return;
     }
     if (i < RING_COUNT - 1) await sleep(RING_GAP_MS);
   }
@@ -238,11 +241,20 @@ module.exports = async function handler(req, res) {
     res.end();
     return;
   }
-  const task = run(job).catch(() => {});
-  if (!hold(task)) await task;
+  try {
+    await run(job);
+    console.log("pinto done", job.hops);
+  } catch (error) {
+    console.log("pinto done-fail", job.hops, error && error.message);
+  }
+  if (res.writableEnded) return;
   res.statusCode = 202;
   res.setHeader("content-type", "application/json; charset=utf-8");
-  res.end(JSON.stringify({ ok: true }));
+  try {
+    res.end(JSON.stringify({ ok: true }));
+  } catch {
+    /* 端末が切れても、通知は送り終えている */
+  }
 };
 
 module.exports.nextStep = nextStep;
