@@ -1,0 +1,980 @@
+"use strict";
+
+const KEY = "pinto-v1";
+const LOOK_MS = 20000;
+const HINTS = [
+  "画面は、目線の高さへ",
+  "肘は、反対の手で支える",
+  "首は、垂直に保つ",
+  "視線は、水平からやや下",
+];
+const HEAT_LINES = [
+  "目のまわりの血流を、通す",
+  "涙の油膜が、戻る時間",
+  "首のうしろを、ゆるめる",
+  "副交感神経が、優位になる",
+];
+
+const $ = (id) => document.getElementById(id);
+
+const el = {
+  intro: $("intro"),
+  introBtn: $("introBtn"),
+  viewNow: $("viewNow"),
+  viewHeat: $("viewHeat"),
+  viewScience: $("viewScience"),
+  navNow: $("navNow"),
+  navHeat: $("navHeat"),
+  navScience: $("navScience"),
+  practicePill: $("practicePill"),
+  settingsBtn: $("settingsBtn"),
+  hero: $("hero"),
+  heroKicker: $("heroKicker"),
+  heroTime: $("heroTime"),
+  heroSub: $("heroSub"),
+  metaLine: $("metaLine"),
+  ringProgress: $("ringProgress"),
+  startBtn: $("startBtn"),
+  runActions: $("runActions"),
+  pauseBtn: $("pauseBtn"),
+  endBtn: $("endBtn"),
+  quickRow: $("quickRow"),
+  quickLook: $("quickLook"),
+  quickBlink: $("quickBlink"),
+  quickPosture: $("quickPosture"),
+  statLook: $("statLook"),
+  statBlink: $("statBlink"),
+  statPosture: $("statPosture"),
+  statHeat: $("statHeat"),
+  todaySentence: $("todaySentence"),
+  week: $("week"),
+  miniBar: $("miniBar"),
+  miniLabel: $("miniLabel"),
+  miniTime: $("miniTime"),
+  look: $("look"),
+  lookNum: $("lookNum"),
+  lookHint: $("lookHint"),
+  lookRunning: $("lookRunning"),
+  lookDone: $("lookDone"),
+  lookContinue: $("lookContinue"),
+  lookFinish: $("lookFinish"),
+  lookSkip: $("lookSkip"),
+  lookProgress: $("lookProgress"),
+  toast: $("toast"),
+  backdrop: $("backdrop"),
+  postureSheet: $("postureSheet"),
+  postureDone: $("postureDone"),
+  postureLater: $("postureLater"),
+  blinkSheet: $("blinkSheet"),
+  blinkDone: $("blinkDone"),
+  blinkLater: $("blinkLater"),
+  heatIdle: $("heatIdle"),
+  heatRun: $("heatRun"),
+  heatDone: $("heatDone"),
+  heatRing: $("heatRing"),
+  heatClock: $("heatClock"),
+  heatCaption: $("heatCaption"),
+  heatStart: $("heatStart"),
+  heatStop: $("heatStop"),
+  heatAgain: $("heatAgain"),
+  settingsDialog: $("settingsDialog"),
+  setSound: $("setSound"),
+  setSpeech: $("setSpeech"),
+  setVibrate: $("setVibrate"),
+  setPractice: $("setPractice"),
+  notifyBtn: $("notifyBtn"),
+  installBtn: $("installBtn"),
+  settingsClose: $("settingsClose"),
+  liveStatus: $("liveStatus"),
+  themeColor: $("themeColor"),
+};
+
+const settings = {
+  sound: true,
+  speech: true,
+  vibrate: true,
+  practice: false,
+  onboarded: false,
+};
+const stats = { days: {} };
+const session = {
+  phase: "idle",
+  phaseEndsAt: 0,
+  duration: 20 * 60 * 1000,
+  remain: 20 * 60 * 1000,
+  nextBlinkAt: 0,
+  nextPostureAt: 0,
+  pausedBlinkIn: 0,
+  pausedPostureIn: 0,
+  resumeAfter: false,
+};
+const heat = { phase: "idle", endsAt: 0, duration: 5 * 60 * 1000 };
+
+let view = "now";
+let tid = 0;
+let endArm = 0;
+let endTimer = 0;
+let audioCtx = null;
+let wakeLock = null;
+let speakTimer = 0;
+let toastTimer = 0;
+let posturePending = false;
+let blinkCounted = false;
+let deferredPrompt = null;
+let lastStatus = "";
+let inertOn = false;
+
+function workMs() {
+  return settings.practice ? 30000 : 20 * 60 * 1000;
+}
+function blinkEvery() {
+  return settings.practice ? 7000 : 4 * 60 * 1000;
+}
+function postureEvery() {
+  return settings.practice ? 16000 : 10 * 60 * 1000;
+}
+function heatMs() {
+  return settings.practice ? 20000 : 5 * 60 * 1000;
+}
+
+function dayKey(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+function blankDay() {
+  return { look: 0, blink: 0, posture: 0, heat: 0 };
+}
+function today() {
+  return stats.days[dayKey(new Date())] || blankDay();
+}
+function fmt(ms) {
+  const s = Math.max(0, Math.ceil(ms / 1000 - 1e-9));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${String(r).padStart(2, "0")}`;
+}
+function setText(node, text) {
+  if (node.textContent !== text) node.textContent = text;
+}
+
+function loadStore() {
+  let data = {};
+  try {
+    data = JSON.parse(localStorage.getItem(KEY)) || {};
+  } catch {
+    data = {};
+  }
+  Object.assign(settings, data.settings || {});
+  if (data.stats && data.stats.days) stats.days = data.stats.days;
+  if (data.session) Object.assign(session, data.session);
+  if (data.heat) Object.assign(heat, data.heat);
+  const phases = ["idle", "working", "paused", "due", "look", "look-done"];
+  if (!phases.includes(session.phase)) session.phase = "idle";
+  if (!["idle", "run", "done"].includes(heat.phase)) heat.phase = "idle";
+}
+
+function save() {
+  const data = {
+    settings: { ...settings },
+    stats,
+    session: { ...session },
+    heat: { ...heat },
+  };
+  try {
+    localStorage.setItem(KEY, JSON.stringify(data));
+  } catch {
+    /* 容量不足でも画面は動かす */
+  }
+}
+
+function bump(key) {
+  const k = dayKey(new Date());
+  if (!stats.days[k]) stats.days[k] = blankDay();
+  stats.days[k][key] += 1;
+  const cutoff = Date.now() - 40 * 86400000;
+  for (const day of Object.keys(stats.days)) {
+    const at = new Date(`${day}T00:00:00`).getTime();
+    if (at < cutoff) delete stats.days[day];
+  }
+  save();
+}
+
+function paintRing(node, remainRatio) {
+  const r = Number(node.getAttribute("r"));
+  const c = 2 * Math.PI * r;
+  const ratio = Math.min(1, Math.max(0, remainRatio));
+  node.style.strokeDasharray = String(c);
+  node.style.strokeDashoffset = String(c * (1 - ratio));
+}
+
+function prime() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (AC && !audioCtx) audioCtx = new AC();
+  if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+}
+
+function chime(kind) {
+  if (!settings.sound || !audioCtx) return;
+  const now = audioCtx.currentTime;
+  const notes = kind === "end" ? [523.25, 659.25, 783.99] : [587.33, 440];
+  notes.forEach((freq, i) => {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = freq;
+    const t = now + i * 0.11;
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.06, t + 0.03);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.72);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start(t);
+    osc.stop(t + 0.76);
+  });
+}
+
+function hush() {
+  clearTimeout(speakTimer);
+  if ("speechSynthesis" in window) speechSynthesis.cancel();
+}
+
+function speak(text) {
+  if (!settings.speech || !("speechSynthesis" in window)) return;
+  try {
+    speechSynthesis.cancel();
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.lang = "ja-JP";
+    utter.rate = 0.96;
+    const voice = speechSynthesis.getVoices().find((item) => item.lang && item.lang.startsWith("ja"));
+    if (voice) utter.voice = voice;
+    speechSynthesis.speak(utter);
+  } catch {
+    /* 読み上げ非対応でもタイマーは進める */
+  }
+}
+
+function scheduleSpeak(text, delay) {
+  clearTimeout(speakTimer);
+  speakTimer = setTimeout(() => speak(text), delay);
+}
+
+function buzz(pattern) {
+  if (!settings.vibrate || !navigator.vibrate) return;
+  navigator.vibrate(pattern);
+}
+
+async function ping(title, body) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  const options = {
+    body,
+    icon: "./icon-192.png",
+    tag: "pinto",
+    renotify: true,
+    lang: "ja",
+    silent: false,
+  };
+  if (settings.vibrate) options.vibrate = [40, 60, 40];
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    if (reg) {
+      await reg.showNotification(title, options);
+      return;
+    }
+  } catch {
+    /* ページ通知へ落とす */
+  }
+  try {
+    new Notification(title, { body, lang: "ja" });
+  } catch {
+    /* 権限があっても失敗することがある */
+  }
+}
+
+async function syncWake() {
+  const need = session.phase === "look" || heat.phase === "run";
+  if (!("wakeLock" in navigator)) return;
+  if (need && !wakeLock) {
+    try {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => {
+        wakeLock = null;
+      });
+    } catch {
+      wakeLock = null;
+    }
+  } else if (!need && wakeLock) {
+    try {
+      await wakeLock.release();
+    } catch {
+      /* すでに解放済み */
+    }
+    wakeLock = null;
+  }
+}
+
+function setInert(on) {
+  if (on === inertOn) return;
+  inertOn = on;
+  const phone = document.querySelector(".phone");
+  if (phone) phone.inert = on;
+  document.querySelectorAll(".rail").forEach((node) => {
+    node.inert = on;
+  });
+}
+
+function closeTransient() {
+  clearTimeout(toastTimer);
+  el.toast.hidden = true;
+  el.toast.classList.remove("is-on");
+  el.postureSheet.hidden = true;
+  el.postureSheet.classList.remove("is-on");
+  el.blinkSheet.hidden = true;
+  el.blinkSheet.classList.remove("is-on");
+  el.backdrop.hidden = true;
+  el.backdrop.classList.remove("is-on");
+  posturePending = false;
+}
+
+function openSheet(sheet) {
+  sheet.hidden = false;
+  el.backdrop.hidden = false;
+  sheet.classList.remove("is-on");
+  el.backdrop.classList.remove("is-on");
+  void sheet.offsetWidth;
+  sheet.classList.add("is-on");
+  el.backdrop.classList.add("is-on");
+}
+
+function showToast() {
+  el.toast.hidden = false;
+  requestAnimationFrame(() => el.toast.classList.add("is-on"));
+  bump("blink");
+  buzz([28, 50, 28]);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    el.toast.classList.remove("is-on");
+    setTimeout(() => {
+      if (!el.toast.classList.contains("is-on")) el.toast.hidden = true;
+    }, 400);
+  }, 4200);
+}
+
+function openBlink() {
+  el.postureSheet.classList.remove("is-on");
+  el.postureSheet.hidden = true;
+  blinkCounted = false;
+  openSheet(el.blinkSheet);
+  render();
+  el.blinkDone.focus();
+}
+
+function finishBlink() {
+  if (blinkCounted) return;
+  blinkCounted = true;
+  bump("blink");
+  closeTransient();
+  render();
+}
+
+function openPosture() {
+  el.blinkSheet.classList.remove("is-on");
+  el.blinkSheet.hidden = true;
+  posturePending = false;
+  openSheet(el.postureSheet);
+  buzz([50, 30, 50]);
+  render();
+  el.postureDone.focus();
+}
+
+function confirmPosture() {
+  bump("posture");
+  closeTransient();
+  render();
+}
+
+function startSession() {
+  const now = Date.now();
+  session.phase = "working";
+  session.duration = workMs();
+  session.remain = session.duration;
+  session.phaseEndsAt = now + session.duration;
+  session.nextBlinkAt = now + blinkEvery();
+  session.nextPostureAt = now + postureEvery();
+  session.resumeAfter = false;
+  endArm = 0;
+  save();
+  ensureTick();
+  render();
+}
+
+function pauseSession() {
+  const now = Date.now();
+  session.remain = Math.max(0, session.phaseEndsAt - now);
+  session.pausedBlinkIn = Math.max(0, session.nextBlinkAt - now);
+  session.pausedPostureIn = Math.max(0, session.nextPostureAt - now);
+  session.phase = "paused";
+  closeTransient();
+  save();
+  render();
+}
+
+function resumeSession() {
+  const now = Date.now();
+  session.phase = "working";
+  session.phaseEndsAt = now + session.remain;
+  session.nextBlinkAt = now + session.pausedBlinkIn;
+  session.nextPostureAt = now + session.pausedPostureIn;
+  save();
+  ensureTick();
+  render();
+}
+
+function endSession() {
+  hush();
+  session.phase = "idle";
+  endArm = 0;
+  clearTimeout(endTimer);
+  closeTransient();
+  save();
+  syncWake();
+  render();
+}
+
+function beginLook() {
+  if (session.phase === "look") return;
+  if (el.settingsDialog.open) el.settingsDialog.close();
+  session.resumeAfter = session.phase === "working" || session.phase === "paused" || session.phase === "due";
+  hush();
+  closeTransient();
+  session.phase = "look";
+  session.duration = LOOK_MS;
+  session.phaseEndsAt = Date.now() + LOOK_MS;
+  save();
+  syncWake();
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  el.lookNum.classList.remove("is-recede");
+  void el.lookNum.offsetWidth;
+  if (!reduce && (settings.sound || settings.speech)) el.lookNum.classList.add("is-recede");
+  if (settings.sound) chime("start");
+  if (settings.speech) {
+    scheduleSpeak(
+      "画面から目を離して、6メートル先を20秒、ぼんやり見てください。終わりは音で知らせます。",
+      settings.sound ? 420 : 0
+    );
+  }
+  buzz([45, 70, 45]);
+  ensureTick();
+  render();
+  el.lookSkip.focus();
+}
+
+function enterDue() {
+  if (session.phase === "due") return;
+  const now = Date.now();
+  session.phase = "due";
+  session.resumeAfter = true;
+  session.nextBlinkAt = Math.max(session.nextBlinkAt, now + blinkEvery());
+  session.nextPostureAt = Math.max(session.nextPostureAt, now + postureEvery());
+  closeTransient();
+  save();
+  buzz([70, 40, 70]);
+  ping("6メートル先へ", "20秒、ぼんやり見てください");
+  render();
+}
+
+function completeLook(opts = {}) {
+  if (session.phase !== "look") return;
+  session.phase = "look-done";
+  bump("look");
+  if (!opts.quiet) {
+    hush();
+    if (settings.sound) chime("end");
+    if (settings.speech) scheduleSpeak("20秒たちました。目をほどきました。", settings.sound ? 360 : 0);
+    buzz([20, 40, 20, 40, 80]);
+  }
+  syncWake();
+  save();
+  render();
+  if (!opts.quiet) el.lookContinue.focus();
+}
+
+function skipLook() {
+  if (session.phase !== "look") return;
+  hush();
+  const back = session.resumeAfter;
+  session.phase = "idle";
+  save();
+  syncWake();
+  if (back) startSession();
+  else render();
+}
+
+function startHeat() {
+  if (heat.phase === "run") return;
+  heat.phase = "run";
+  heat.duration = heatMs();
+  heat.endsAt = Date.now() + heat.duration;
+  save();
+  syncWake();
+  ensureTick();
+  render();
+}
+
+function stopHeat() {
+  heat.phase = "idle";
+  save();
+  syncWake();
+  render();
+}
+
+function completeHeat(opts = {}) {
+  if (heat.phase !== "run") return;
+  heat.phase = "done";
+  bump("heat");
+  const busy = session.phase === "look" || session.phase === "look-done";
+  if (!opts.quiet && !busy) {
+    if (settings.sound) chime("end");
+    if (settings.speech) scheduleSpeak("5分たちました。温熱ケアはここまでです。", settings.sound ? 360 : 0);
+    buzz([20, 40, 80]);
+  }
+  syncWake();
+  save();
+  render();
+}
+
+function shouldRun() {
+  return session.phase === "working" || session.phase === "look" || heat.phase === "run";
+}
+
+function tick() {
+  const now = Date.now();
+  if (session.phase === "working" && now >= session.phaseEndsAt) {
+    if (document.hidden) enterDue();
+    else beginLook();
+    return;
+  }
+  if (session.phase === "look" && now >= session.phaseEndsAt) {
+    completeLook();
+    return;
+  }
+  if (heat.phase === "run" && now >= heat.endsAt) {
+    completeHeat();
+    return;
+  }
+  if (session.phase === "working" && !sheetOpen()) {
+    if (now >= session.nextPostureAt) {
+      session.nextPostureAt = now + postureEvery();
+      save();
+      if (document.hidden) {
+        posturePending = true;
+        ping("目線まで上げる", "スマホは目の高さ。肘は反対の手で支えてください");
+      } else {
+        openPosture();
+      }
+    } else if (now >= session.nextBlinkAt && !el.toast.classList.contains("is-on")) {
+      session.nextBlinkAt = now + blinkEvery();
+      save();
+      if (document.hidden) ping("まばたき", "ゆっくり閉じて、ゆっくり開いてください");
+      else showToast();
+    }
+  }
+  render();
+}
+
+function sheetOpen() {
+  return el.postureSheet.classList.contains("is-on") || el.blinkSheet.classList.contains("is-on");
+}
+
+function ensureTick() {
+  if (tid) return;
+  const loop = () => {
+    tick();
+    if (shouldRun()) tid = setTimeout(loop, 250);
+    else tid = 0;
+  };
+  tid = setTimeout(loop, 250);
+}
+
+function sayStatus(text) {
+  if (text === lastStatus) return;
+  lastStatus = text;
+  el.liveStatus.textContent = text;
+}
+
+function renderStats() {
+  const t = today();
+  setText(el.statLook, String(t.look));
+  setText(el.statBlink, String(t.blink));
+  setText(el.statPosture, String(t.posture));
+  setText(el.statHeat, String(t.heat));
+  setText(
+    el.todaySentence,
+    t.look > 0 ? `今日、毛様体筋を ${t.look} 回ほどきました` : "今日は、まだ目をほどいていません"
+  );
+  const labels = ["月", "火", "水", "木", "金", "土", "日"];
+  const now = new Date();
+  const monday = new Date(now);
+  monday.setHours(0, 0, 0, 0);
+  monday.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+  const todayKey = dayKey(now);
+  let html = "";
+  for (let i = 0; i < 7; i += 1) {
+    const date = new Date(monday);
+    date.setDate(monday.getDate() + i);
+    const key = dayKey(date);
+    const count = stats.days[key]?.look || 0;
+    const height = count <= 0 ? 0 : Math.min(100, count * 28);
+    const cls = key === todayKey ? "is-today" : "";
+    html += `<div class="${cls}" title="${labels[i]} ${count}回"><i style="--h:${height}%"><b></b></i><span>${labels[i]}</span></div>`;
+  }
+  if (el.week.dataset.sig !== html) {
+    el.week.dataset.sig = html;
+    el.week.innerHTML = html;
+  }
+}
+
+function renderHero() {
+  const now = Date.now();
+  let kicker = "20-20-20";
+  let time = fmt(workMs());
+  let sub = "見たら、6メートル先を20秒";
+  let meta = "";
+  let ratio = 1;
+  let status = "待機中です。画面を見はじめると、20分を数えます。";
+
+  if (session.phase === "working") {
+    const remain = Math.max(0, session.phaseEndsAt - now);
+    kicker = settings.practice ? "練習 · つぎのリセット" : "つぎのリセット";
+    time = fmt(remain);
+    sub = HINTS[Math.floor(now / 8000) % HINTS.length];
+    meta = `まばたき ${fmt(session.nextBlinkAt - now)} · 姿勢 ${fmt(session.nextPostureAt - now)}`;
+    if (heat.phase === "run") meta = `温熱 ${fmt(heat.endsAt - now)} · ${meta}`;
+    ratio = session.duration ? remain / session.duration : 0;
+    status = `画面時間を計測中。次のリセットまで約${Math.max(1, Math.ceil(remain / 60000))}分です。`;
+  } else if (session.phase === "paused") {
+    kicker = "一時停止";
+    time = fmt(session.remain);
+    sub = "カウントは止まっています";
+    ratio = session.duration ? session.remain / session.duration : 0;
+    status = "一時停止中です。";
+  } else if (session.phase === "due") {
+    kicker = "20分たちました";
+    time = "0:20";
+    sub = "6メートル先を、ぼんやり";
+    ratio = 1;
+    status = "20分たちました。6メートル先を20秒見てください。";
+  } else if (settings.practice) {
+    kicker = "練習";
+    sub = "20秒で、リセットが来ます";
+    time = fmt(workMs());
+  }
+
+  setText(el.heroKicker, kicker);
+  setText(el.heroTime, time);
+  setText(el.heroSub, sub);
+  el.metaLine.hidden = !meta;
+  if (meta) setText(el.metaLine, meta);
+  paintRing(el.ringProgress, ratio);
+  el.hero.classList.toggle("is-due", session.phase === "due");
+  el.hero.classList.toggle("is-paused", session.phase === "paused");
+  el.hero.classList.toggle("is-idle", session.phase === "idle");
+
+  const showStart = session.phase === "idle" || session.phase === "due";
+  el.startBtn.hidden = !showStart;
+  el.runActions.hidden = session.phase !== "working" && session.phase !== "paused";
+  el.quickRow.hidden = session.phase === "due";
+  setText(el.startBtn, session.phase === "due" ? "目を離してはじめる" : "画面を見はじめる");
+  setText(el.pauseBtn, session.phase === "paused" ? "つづける" : "一時停止");
+  setText(el.endBtn, Date.now() < endArm ? "本当に終わる" : "終わる");
+
+  if (session.phase === "look") status = "いまは画面を見ず、6メートル先を20秒見てください。";
+  if (session.phase === "look-done") status = "20秒終わりました。毛様体筋がゆるみました。";
+  sayStatus(status);
+}
+
+function renderLook() {
+  const on = session.phase === "look" || session.phase === "look-done";
+  el.look.classList.toggle("is-on", on);
+  el.look.setAttribute("aria-hidden", on ? "false" : "true");
+  document.body.classList.toggle("is-look", on);
+  el.themeColor.setAttribute("content", on ? "#120E0B" : "#F4EEE4");
+  el.lookRunning.hidden = session.phase !== "look";
+  el.lookDone.hidden = session.phase !== "look-done";
+  if (session.phase === "look") {
+    const remain = Math.max(0, session.phaseEndsAt - Date.now());
+    const sec = Math.max(0, Math.ceil(remain / 1000 - 1e-9));
+    setText(el.lookNum, String(sec));
+    paintRing(el.lookProgress, session.duration ? remain / session.duration : 0);
+    const quiet = settings.sound || settings.speech;
+    el.look.classList.toggle("is-quiet", quiet);
+    setText(
+      el.lookHint,
+      quiet
+        ? "終わりは、音で知らせます。\n画面は見ないでください。"
+        : "数字が 0 になるまで、\nぼんやり見てください。"
+    );
+  } else {
+    el.look.classList.remove("is-quiet");
+  }
+}
+
+function renderHeat() {
+  el.heatIdle.hidden = heat.phase !== "idle";
+  el.heatRun.hidden = heat.phase !== "run";
+  el.heatDone.hidden = heat.phase !== "done";
+  setText(el.heatStart, settings.practice ? "練習：20秒であたためる" : "5分であたためる");
+  if (heat.phase === "run") {
+    const remain = Math.max(0, heat.endsAt - Date.now());
+    const elapsed = Math.max(0, heat.duration - remain);
+    const p = heat.duration ? (elapsed / heat.duration) * 100 : 0;
+    el.heatRing.style.setProperty("--p", p.toFixed(2));
+    setText(el.heatClock, fmt(remain));
+    setText(el.heatCaption, HEAT_LINES[Math.floor(elapsed / 15000) % HEAT_LINES.length]);
+  }
+}
+
+function renderChrome() {
+  el.practicePill.hidden = !settings.practice;
+  const looking = session.phase === "look" || session.phase === "look-done";
+  const showMini = view !== "now" && session.phase !== "idle" && !looking;
+  el.miniBar.hidden = !showMini;
+  if (showMini) {
+    if (session.phase === "due") {
+      setText(el.miniLabel, "目を休める時間");
+      setText(el.miniTime, "0:20");
+    } else if (session.phase === "paused") {
+      setText(el.miniLabel, "一時停止");
+      setText(el.miniTime, fmt(session.remain));
+    } else {
+      setText(el.miniLabel, "つぎのリセット");
+      setText(el.miniTime, fmt(session.phaseEndsAt - Date.now()));
+    }
+  }
+  let title = "ピント — 20分ごとに、目をほどく";
+  if (session.phase === "working") title = `${fmt(session.phaseEndsAt - Date.now())} · ピント`;
+  else if (session.phase === "due") title = "目を休める · ピント";
+  else if (session.phase === "look") title = "画面を見ない · ピント";
+  else if (session.phase === "paused") title = "一時停止 · ピント";
+  else if (session.phase === "look-done") title = "ほどけた · ピント";
+  if (document.title !== title) document.title = title;
+}
+
+function renderNotify() {
+  if (!("Notification" in window)) {
+    setText(el.notifyBtn, "このブラウザは通知に対応していません");
+    el.notifyBtn.disabled = true;
+    return;
+  }
+  el.notifyBtn.disabled = Notification.permission === "granted";
+  if (Notification.permission === "granted") setText(el.notifyBtn, "通知はオン");
+  else if (Notification.permission === "denied") setText(el.notifyBtn, "通知がブロックされています");
+  else setText(el.notifyBtn, "通知を許可する");
+}
+
+function render() {
+  renderHero();
+  renderLook();
+  renderHeat();
+  renderStats();
+  renderChrome();
+  const sheetOn = el.postureSheet.classList.contains("is-on") || el.blinkSheet.classList.contains("is-on");
+  const lookOn = session.phase === "look" || session.phase === "look-done";
+  setInert(sheetOn || lookOn || !settings.onboarded);
+}
+
+function showView(name) {
+  view = name;
+  el.viewNow.classList.toggle("is-on", name === "now");
+  el.viewHeat.classList.toggle("is-on", name === "heat");
+  el.viewScience.classList.toggle("is-on", name === "science");
+  el.navNow.classList.toggle("is-on", name === "now");
+  el.navHeat.classList.toggle("is-on", name === "heat");
+  el.navScience.classList.toggle("is-on", name === "science");
+  for (const [button, on] of [
+    [el.navNow, name === "now"],
+    [el.navHeat, name === "heat"],
+    [el.navScience, name === "science"],
+  ]) {
+    if (on) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  }
+  render();
+}
+
+function syncIntro() {
+  const on = !settings.onboarded;
+  el.intro.classList.toggle("is-on", on);
+  el.intro.setAttribute("aria-hidden", on ? "false" : "true");
+  if (!on) document.documentElement.classList.remove("need-intro");
+}
+
+function syncSettingsForm() {
+  el.setSound.checked = settings.sound;
+  el.setSpeech.checked = settings.speech;
+  el.setVibrate.checked = settings.vibrate;
+  el.setPractice.checked = settings.practice;
+  renderNotify();
+}
+
+function bindSettings(input, key) {
+  input.addEventListener("change", () => {
+    settings[key] = input.checked;
+    save();
+    render();
+  });
+}
+
+function reconcile() {
+  const now = Date.now();
+  if (session.phase === "working" && session.phaseEndsAt <= now) session.phase = "due";
+  if (session.phase === "look" && session.phaseEndsAt <= now) completeLook({ quiet: true });
+  if (heat.phase === "run" && heat.endsAt <= now) completeHeat({ quiet: true });
+}
+
+function onVisible() {
+  if (document.hidden) return;
+  if (posturePending && session.phase === "working") openPosture();
+  if (session.phase === "look" || heat.phase === "run") syncWake();
+  tick();
+  if (shouldRun()) ensureTick();
+}
+
+function bind() {
+  el.introBtn.addEventListener("click", () => {
+    prime();
+    settings.onboarded = true;
+    save();
+    syncIntro();
+    render();
+  });
+  el.settingsBtn.addEventListener("click", () => {
+    syncSettingsForm();
+    el.settingsDialog.showModal();
+  });
+  el.settingsClose.addEventListener("click", () => el.settingsDialog.close());
+  bindSettings(el.setSound, "sound");
+  bindSettings(el.setSpeech, "speech");
+  bindSettings(el.setVibrate, "vibrate");
+  bindSettings(el.setPractice, "practice");
+  el.notifyBtn.addEventListener("click", async () => {
+    prime();
+    if (!("Notification" in window) || Notification.permission !== "default") return;
+    await Notification.requestPermission();
+    renderNotify();
+  });
+  el.installBtn.addEventListener("click", async () => {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    await deferredPrompt.userChoice;
+    deferredPrompt = null;
+    el.installBtn.hidden = true;
+  });
+  document.querySelectorAll(".nav button").forEach((btn) => {
+    btn.addEventListener("click", () => showView(btn.dataset.view));
+  });
+  el.miniBar.addEventListener("click", () => showView("now"));
+  el.startBtn.addEventListener("click", () => {
+    prime();
+    if (session.phase === "due") beginLook();
+    else startSession();
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission().then(renderNotify);
+    }
+  });
+  el.pauseBtn.addEventListener("click", () => {
+    prime();
+    if (session.phase === "paused") resumeSession();
+    else pauseSession();
+  });
+  el.endBtn.addEventListener("click", () => {
+    prime();
+    if (endArm && Date.now() <= endArm) {
+      clearTimeout(endTimer);
+      endSession();
+      return;
+    }
+    endArm = Date.now() + 4000;
+    render();
+    clearTimeout(endTimer);
+    endTimer = setTimeout(() => {
+      endArm = 0;
+      render();
+    }, 4000);
+  });
+  el.quickLook.addEventListener("click", () => {
+    prime();
+    beginLook();
+  });
+  el.quickBlink.addEventListener("click", () => {
+    prime();
+    openBlink();
+  });
+  el.quickPosture.addEventListener("click", () => {
+    prime();
+    openPosture();
+  });
+  el.lookSkip.addEventListener("click", () => {
+    prime();
+    skipLook();
+  });
+  el.lookContinue.addEventListener("click", () => {
+    prime();
+    hush();
+    startSession();
+  });
+  el.lookFinish.addEventListener("click", () => {
+    hush();
+    session.phase = "idle";
+    save();
+    syncWake();
+    render();
+  });
+  el.toast.addEventListener("click", () => {
+    el.toast.classList.remove("is-on");
+    el.toast.hidden = true;
+  });
+  el.blinkDone.addEventListener("click", finishBlink);
+  el.blinkLater.addEventListener("click", () => {
+    closeTransient();
+    render();
+  });
+  el.postureDone.addEventListener("click", confirmPosture);
+  el.postureLater.addEventListener("click", () => {
+    closeTransient();
+    render();
+  });
+  el.backdrop.addEventListener("click", () => {
+    closeTransient();
+    render();
+  });
+  el.heatStart.addEventListener("click", () => {
+    prime();
+    startHeat();
+  });
+  el.heatStop.addEventListener("click", stopHeat);
+  el.heatAgain.addEventListener("click", () => {
+    heat.phase = "idle";
+    save();
+    render();
+  });
+  document.addEventListener("visibilitychange", onVisible);
+  window.addEventListener("focus", onVisible);
+  window.addEventListener("beforeinstallprompt", (event) => {
+    event.preventDefault();
+    deferredPrompt = event;
+    el.installBtn.hidden = false;
+  });
+}
+
+loadStore();
+bind();
+syncIntro();
+reconcile();
+render();
+syncWake();
+if (shouldRun()) ensureTick();
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("./sw.js").catch(() => {});
+}

@@ -1,0 +1,32 @@
+{
+  "name": "ピント — 20分ごとに、目をほどく",
+  "short_name": "ピント",
+  "description": "20-20-20ルール、姿勢、まばたき、温熱ケアで、スマホの見すぎから目と首を守るタイマー",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F4EEE4",
+  "theme_color": "#F4EEE4",
+  "lang": "ja",
+  "icons": [
+    {
+      "src": "./icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
