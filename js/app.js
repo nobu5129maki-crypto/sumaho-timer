@@ -1578,7 +1578,10 @@ function bind() {
   });
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.addEventListener("message", (event) => {
-      if (event.data && event.data.type === "due" && session.phase === "working") enterDue();
+      if (event.data && event.data.type === "due") {
+        if (session.phase === "working") enterDue();
+        else if (session.phase === "due" && !session.alarmSilenced) ringAlarm();
+      }
     });
   }
   window.addEventListener("beforeinstallprompt", (event) => {

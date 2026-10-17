@@ -229,6 +229,12 @@ module.exports = async function handler(req, res) {
     res.end();
     return;
   }
+  if (body && body.ping === true) {
+    console.log("pinto shown", String(body.id || "").slice(0, 20));
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
   const internal = req.headers["x-pinto-chain"] === process.env.ALARM_INTERNAL_SECRET;
   if (!internal && !fromApp(req)) {
     res.statusCode = 403;

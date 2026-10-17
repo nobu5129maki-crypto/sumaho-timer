@@ -1,4 +1,4 @@
-const CACHE = "pinto-v10";
+const CACHE = "pinto-v11";
 const ASSETS = [
   "./",
   "./index.html",
@@ -100,36 +100,63 @@ function clearBookmark() {
   );
 }
 
-function showAlarm(title, body, data) {
-  const seq = data && Number.isFinite(data.seq) ? data.seq : Date.now();
-  const options = {
-    body: body || "アプリを開くと、ストップまで音と振動が続きます。",
-    icon: "./icon-192.png",
-    badge: "./icon-192.png",
-    tag: "pinto-alarm-" + seq,
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function alarmIcon() {
+  return new URL("./icon-192.png", self.registration.scope).href;
+}
+
+async function showAlarm(title, body, data) {
+  const text = title || "20分たちました";
+  const detail = body || "アプリを開くと、ストップまで音と振動が続きます。";
+  const icon = alarmIcon();
+  const full = {
+    body: detail,
+    icon,
+    badge: icon,
+    tag: "pinto-alarm",
     renotify: true,
     lang: "ja",
-    silent: Boolean(data && data.sound === false),
     requireInteraction: true,
     data: { url: "./", id: data && data.id },
   };
-  if (!data || data.vibrate !== false) options.vibrate = [600, 200, 600, 200, 600, 200, 800];
-  return self.registration.showNotification(title || "20分たちました", options);
+  if (!data || data.vibrate !== false) full.vibrate = [500, 180, 500, 180, 500, 180, 800];
+  try {
+    await self.registration.showNotification(text, full);
+    return;
+  } catch {
+    /* 一部の端末はオプション付きだと通知自体を出さない */
+  }
+  await self.registration.showNotification(text, {
+    body: detail,
+    tag: "pinto-alarm",
+    renotify: true,
+    icon,
+  });
 }
 
 async function deliverPush(data) {
-  if (!data || typeof data.id !== "string") return;
-  let bookmark = null;
-  let failed = false;
-  try {
-    bookmark = await readBookmark();
-  } catch {
-    failed = true;
-  }
-  if (!failed && bookmark && bookmark.id !== data.id) return;
+  const title = data && data.title;
+  const body = data && data.body;
   const open = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
   open.forEach((client) => client.postMessage({ type: "due" }));
-  await showAlarm(data.title, data.body, data);
+  for (let i = 0; i < 8; i += 1) {
+    try {
+      await showAlarm(title, body, data || {});
+    } catch {
+      /* 次の回で出し直す */
+    }
+    if (i === 0) {
+      fetch("./api/alarm", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ping: true, id: data && data.id }),
+      }).catch(() => {});
+    }
+    if (i < 7) await wait(2500);
+  }
 }
 
 self.addEventListener("push", (event) => {
@@ -164,8 +191,8 @@ self.addEventListener("message", (event) => {
       releaseAlarm = () => {};
       try {
         const open = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-        const visible = open.some((client) => client.visibilityState === "visible");
-        if (!visible) await showAlarm(title);
+        open.forEach((client) => client.postMessage({ type: "due" }));
+        await showAlarm(title);
       } catch {
         /* 通知が出せなくても、画面を開いたときに鳴らす */
       }
