@@ -185,6 +185,10 @@ function fmt(ms) {
   const r = s % 60;
   return `${m}:${String(r).padStart(2, "0")}`;
 }
+function clockLabel(at) {
+  const d = new Date(at);
+  return `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
 function setText(node, text) {
   if (node.textContent !== text) node.textContent = text;
 }
@@ -437,6 +441,29 @@ function disarmBackground() {
   schedulingFor = "";
   clearBookmark();
   swPost({ type: "disarm" });
+  if (!("serviceWorker" in navigator)) return;
+  navigator.serviceWorker.ready
+    .then((reg) => reg.getNotifications({ tag: "pinto-local" }))
+    .then((list) => list.forEach((note) => note.close()))
+    .catch(() => {});
+}
+
+function scheduleLocalAlarm(at, title) {
+  if (typeof TimestampTrigger !== "function" || !("serviceWorker" in navigator)) return;
+  navigator.serviceWorker.ready
+    .then((reg) =>
+      reg.showNotification(title, {
+        tag: "pinto-local",
+        body: `このスマホの${clockLabel(at)}に、音と振動で知らせます。`,
+        showTrigger: new TimestampTrigger(at),
+        vibrate: [500, 180, 500, 180, 500, 180, 800],
+        renotify: true,
+        requireInteraction: true,
+        lang: "ja",
+        data: { url: "./", id: String(at) },
+      })
+    )
+    .catch(() => {});
 }
 
 function scheduleBackgroundAlarm() {
@@ -445,6 +472,7 @@ function scheduleBackgroundAlarm() {
   const at = session.phaseEndsAt;
   writeBookmark(id, at);
   swPost({ type: "bookmark", id, at });
+  scheduleLocalAlarm(at, alarmLabel());
   if (session.backgroundId === id || schedulingFor === id) return;
   schedulingFor = id;
   ensureSubscription()
@@ -456,6 +484,8 @@ function scheduleBackgroundAlarm() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           fireAt: at,
+          phoneNow: Date.now(),
+          clock: clockLabel(at),
           id,
           title: alarmLabel(),
           vibrate: settings.vibrate,
@@ -1066,13 +1096,13 @@ function renderHero() {
     const remain = Math.max(0, session.phaseEndsAt - now);
     kicker = settings.practice ? "練習 · アラームまで" : "つぎのリセット";
     time = fmt(remain);
-    sub = settings.practice ? "30秒で、アラームが鳴ります" : HINTS[Math.floor(now / 8000) % HINTS.length];
+    sub = `このスマホの${clockLabel(session.phaseEndsAt)}に鳴ります`;
     meta = `まばたき ${fmt(session.nextBlinkAt - now)} · 姿勢 ${fmt(session.nextPostureAt - now)}`;
     if (heat.phase === "run") meta = `温熱 ${fmt(heat.endsAt - now)} · ${meta}`;
     ratio = session.duration ? remain / session.duration : 0;
     status = settings.practice
-      ? "練習中です。30秒でアラームが鳴ります。"
-      : `画面時間を計測中。次のリセットまで約${Math.max(1, Math.ceil(remain / 60000))}分です。`;
+      ? `練習中です。このスマホの${clockLabel(session.phaseEndsAt)}に鳴ります。`
+      : `このスマホの${clockLabel(session.phaseEndsAt)}に、音と振動で知らせます。`;
     if (typeof Notification === "undefined" || Notification.permission !== "granted") {
       status += " 通知を許可すると、閉じても鳴ります。";
     } else {

@@ -79,22 +79,30 @@ function readBody(req) {
 }
 
 function normalize(body, internal) {
-  const fireAt = Number(body && body.fireAt);
+  let fireAt = Number(body && body.fireAt);
+  const phoneNow = Number(body && body.phoneNow);
   const id = String((body && body.id) || "");
   const sub = body && body.subscription;
   const hops = Number(body && body.hops) || 0;
   const title = body && body.title === "30秒たちました" ? "30秒たちました" : "20分たちました";
+  const clock = typeof (body && body.clock) === "string" && /^\d{1,2}:\d{2}$/.test(body.clock) ? body.clock : "";
   if (!Number.isFinite(fireAt) || !/^\d{10,16}$/.test(id)) return null;
   if (!sub || !endpointAllowed(sub.endpoint)) return null;
   if (!sub.keys || typeof sub.keys.p256dh !== "string" || typeof sub.keys.auth !== "string") return null;
   if (sub.keys.p256dh.length > 200 || sub.keys.auth.length > 80) return null;
   if (hops < 0 || hops > MAX_HOPS || (!internal && hops !== 0)) return null;
+  if (!internal && Number.isFinite(phoneNow)) {
+    const delay = fireAt - phoneNow;
+    if (!Number.isFinite(delay) || delay > MAX_AHEAD_MS || delay < -2 * 60 * 1000) return null;
+    if (Math.abs(Date.now() - phoneNow) > 15000) fireAt = Date.now() + delay;
+  }
   const skew = fireAt - Date.now();
   if (skew > MAX_AHEAD_MS || skew < -2 * 60 * 1000) return null;
   return {
     fireAt,
     id,
     title,
+    clock,
     vibrate: body.vibrate !== false,
     sound: body.sound !== false,
     hops,
@@ -109,7 +117,9 @@ async function sendPush(job, seq) {
   webpush.setVapidDetails("mailto:nobu5129maki@gmail.com", process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY);
   const payload = JSON.stringify({
     title: job.title,
-    body: "アプリを開くと、ストップまで音と振動が続きます。",
+    body: job.clock
+      ? `このスマホの${job.clock}です。開くと、ストップまで音と振動が続きます。`
+      : "アプリを開くと、ストップまで音と振動が続きます。",
     id: job.id,
     seq,
     vibrate: job.vibrate,
@@ -129,6 +139,7 @@ async function chain(job) {
     fireAt: job.fireAt,
     id: job.id,
     title: job.title,
+    clock: job.clock,
     vibrate: job.vibrate,
     sound: job.sound,
     hops: job.hops + 1,
