@@ -1,3 +1,7 @@
 .vercel
 .DS_Store
 Thumbs.db
+node_modules
+.alarm-secrets.json
+vapid-public.txt
+.commit-msg.txt

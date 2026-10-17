@@ -1,6 +1,7 @@
 "use strict";
 
 const KEY = "pinto-v1";
+const VAPID_PUBLIC_KEY = "BDGQKoWW01aztvoY-jw9fioBbUGUCoNlK-sJU1UTjz1AS_SY577IEdZlWhlWElorOvXgFy-jrjykgRyub4V4m2c";
 const LOOK_MS = 20000;
 const HINTS = [
   "画面は、目線の高さへ",
@@ -119,6 +120,7 @@ const session = {
   pausedPostureIn: 0,
   resumeAfter: false,
   alarmSilenced: false,
+  backgroundId: "",
 };
 const heat = { phase: "idle", endsAt: 0, duration: 5 * 60 * 1000 };
 
@@ -146,6 +148,8 @@ let blinkCounted = false;
 let deferredPrompt = null;
 let lastStatus = "";
 let inertOn = false;
+let pushSub = null;
+let schedulingFor = "";
 
 function workMs() {
   return settings.practice ? 30000 : 20 * 60 * 1000;
@@ -345,6 +349,133 @@ function swPost(message) {
   else navigator.serviceWorker.ready.then(post).catch(() => {});
 }
 
+function alarmDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open("pinto-alarm", 1);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains("kv")) req.result.createObjectStore("kv");
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function writeBookmark(id, at) {
+  return alarmDb()
+    .then(
+      (db) =>
+        new Promise((resolve) => {
+          const tx = db.transaction("kv", "readwrite");
+          tx.objectStore("kv").put({ id: String(id), at }, "current");
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => resolve();
+        })
+    )
+    .catch(() => {});
+}
+
+function clearBookmark() {
+  return alarmDb()
+    .then(
+      (db) =>
+        new Promise((resolve) => {
+          const tx = db.transaction("kv", "readwrite");
+          tx.objectStore("kv").delete("current");
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => resolve();
+        })
+    )
+    .catch(() => {});
+}
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(base64);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i += 1) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
+async function ensureSubscription() {
+  if (!("PushManager" in window) || !("serviceWorker" in navigator) || !("Notification" in window)) return null;
+  if (Notification.permission !== "granted") return null;
+  if (pushSub) return pushSub;
+  const reg = await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) {
+    sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+    });
+  }
+  pushSub = sub.toJSON();
+  return pushSub;
+}
+
+async function allowNotify() {
+  if (!("Notification" in window)) return;
+  if (Notification.permission === "default") {
+    try {
+      await Notification.requestPermission();
+    } catch {
+      /* 許可ダイアログが出せなくても計測は始める */
+    }
+  }
+  renderNotify();
+  if (Notification.permission === "granted") {
+    try {
+      await ensureSubscription();
+    } catch {
+      /* 購読できなくても、開いているあいだは鳴る */
+    }
+  }
+}
+
+function disarmBackground() {
+  session.backgroundId = "";
+  schedulingFor = "";
+  clearBookmark();
+  swPost({ type: "disarm" });
+}
+
+function scheduleBackgroundAlarm() {
+  if (session.phase !== "working") return;
+  const id = String(session.phaseEndsAt);
+  const at = session.phaseEndsAt;
+  writeBookmark(id, at);
+  swPost({ type: "bookmark", id, at });
+  if (session.backgroundId === id || schedulingFor === id) return;
+  schedulingFor = id;
+  ensureSubscription()
+    .then((sub) => {
+      if (!sub || session.phase !== "working" || String(session.phaseEndsAt) !== id) return null;
+      return fetch("/api/alarm", {
+        method: "POST",
+        keepalive: true,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          fireAt: at,
+          id,
+          title: alarmLabel(),
+          vibrate: settings.vibrate,
+          sound: settings.sound,
+          subscription: sub,
+        }),
+      });
+    })
+    .then((res) => {
+      if (res && res.ok && session.phase === "working" && String(session.phaseEndsAt) === id) {
+        session.backgroundId = id;
+        save();
+      }
+    })
+    .catch(() => {})
+    .finally(() => {
+      if (schedulingFor === id) schedulingFor = "";
+    });
+}
+
 function stopVibeLoop() {
   clearInterval(vibeTimer);
   vibeTimer = 0;
@@ -386,6 +517,7 @@ function silenceAlarm() {
   session.alarmSilenced = true;
   alarmHeard = true;
   stopAlarm();
+  disarmBackground();
   save();
   render();
 }
@@ -450,7 +582,7 @@ function armClock() {
   clearTimeout(deadlineTimer);
   deadlineTimer = 0;
   if (session.phase !== "working") {
-    swPost({ type: "disarm" });
+    disarmBackground();
     return;
   }
   const delay = Math.max(0, session.phaseEndsAt - Date.now());
@@ -458,6 +590,7 @@ function armClock() {
     if (session.phase === "working") enterDue();
   }, delay);
   swPost({ type: "arm", at: session.phaseEndsAt, title: alarmLabel() });
+  scheduleBackgroundAlarm();
 }
 
 function hush() {
@@ -722,7 +855,7 @@ function beginLook() {
   hush();
   stopAlarm();
   alarmHeard = false;
-  swPost({ type: "disarm" });
+  disarmBackground();
   closeTransient();
   session.phase = "look";
   session.duration = LOOK_MS;
@@ -762,7 +895,6 @@ function enterDue() {
   session.nextPostureAt = Math.max(session.nextPostureAt, now + postureEvery());
   closeTransient();
   save();
-  swPost({ type: "disarm" });
   session.alarmSilenced = false;
   alarmHeard = false;
   ringAlarm();
@@ -941,6 +1073,11 @@ function renderHero() {
     status = settings.practice
       ? "練習中です。30秒でアラームが鳴ります。"
       : `画面時間を計測中。次のリセットまで約${Math.max(1, Math.ceil(remain / 60000))}分です。`;
+    if (typeof Notification === "undefined" || Notification.permission !== "granted") {
+      status += " 通知を許可すると、閉じても鳴ります。";
+    } else {
+      status += " アプリを閉じても、時間が来たら通知します。";
+    }
   } else if (session.phase === "paused") {
     kicker = "一時停止";
     time = fmt(session.remain);
@@ -1300,9 +1437,8 @@ function bind() {
   });
   el.notifyBtn.addEventListener("click", async () => {
     prime();
-    if (!("Notification" in window) || Notification.permission !== "default") return;
-    await Notification.requestPermission();
-    renderNotify();
+    await allowNotify();
+    if (session.phase === "working") scheduleBackgroundAlarm();
   });
   el.installBtn.addEventListener("click", () => {
     prime();
@@ -1348,13 +1484,14 @@ function bind() {
     prime();
     silenceAlarm();
   });
-  el.startBtn.addEventListener("click", () => {
+  el.startBtn.addEventListener("click", async () => {
     prime();
-    if (session.phase === "due") beginLook();
-    else startSession();
-    if ("Notification" in window && Notification.permission === "default") {
-      Notification.requestPermission().then(renderNotify);
+    if (session.phase === "due") {
+      beginLook();
+      return;
     }
+    await allowNotify();
+    startSession();
   });
   el.pauseBtn.addEventListener("click", () => {
     prime();
@@ -1435,8 +1572,15 @@ function bind() {
   document.addEventListener("visibilitychange", onVisible);
   window.addEventListener("focus", onVisible);
   window.addEventListener("pagehide", () => {
-    if (session.phase === "working") swPost({ type: "arm", at: session.phaseEndsAt, title: alarmLabel() });
+    if (session.phase !== "working") return;
+    swPost({ type: "arm", at: session.phaseEndsAt, title: alarmLabel() });
+    scheduleBackgroundAlarm();
   });
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.addEventListener("message", (event) => {
+      if (event.data && event.data.type === "due" && session.phase === "working") enterDue();
+    });
+  }
   window.addEventListener("beforeinstallprompt", (event) => {
     event.preventDefault();
     deferredPrompt = event;
@@ -1462,6 +1606,14 @@ syncWake();
 if (shouldRun()) ensureTick();
 if (session.phase === "working") armClock();
 if ("serviceWorker" in navigator) {
+  let hadController = Boolean(navigator.serviceWorker.controller);
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!hadController) {
+      hadController = true;
+      return;
+    }
+    location.reload();
+  });
   navigator.serviceWorker.register("./sw.js", { scope: "./" }).then(() => {
     if (session.phase === "working") armClock();
   }).catch(() => {});

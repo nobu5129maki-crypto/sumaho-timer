@@ -1,4 +1,4 @@
-const CACHE = "pinto-v8";
+const CACHE = "pinto-v9";
 const ASSETS = [
   "./",
   "./index.html",
@@ -53,25 +53,107 @@ function clearAlarmTimer() {
   releaseAlarm = () => {};
 }
 
-function showAlarm(title) {
-  return self.registration.showNotification(title || "20分たちました", {
-    body: "6メートル先を、20秒。スタートを押してください。",
+function alarmDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open("pinto-alarm", 1);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains("kv")) req.result.createObjectStore("kv");
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function writeBookmark(id, at) {
+  return alarmDb().then(
+    (db) =>
+      new Promise((resolve) => {
+        const tx = db.transaction("kv", "readwrite");
+        tx.objectStore("kv").put({ id: String(id), at }, "current");
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      })
+  );
+}
+
+function readBookmark() {
+  return alarmDb().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction("kv", "readonly");
+        const req = tx.objectStore("kv").get("current");
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      })
+  );
+}
+
+function clearBookmark() {
+  return alarmDb().then(
+    (db) =>
+      new Promise((resolve) => {
+        const tx = db.transaction("kv", "readwrite");
+        tx.objectStore("kv").delete("current");
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      })
+  );
+}
+
+function showAlarm(title, body, data) {
+  const options = {
+    body: body || "アプリを開くと、ストップまで音と振動が続きます。",
     icon: "./icon-192.png",
     badge: "./icon-192.png",
     tag: "pinto-alarm",
     renotify: true,
     lang: "ja",
-    silent: false,
+    silent: Boolean(data && data.sound === false),
     requireInteraction: true,
-    vibrate: [200, 100, 200, 100, 200, 100, 420],
-    data: { url: "./" },
-  });
+    data: { url: "./", id: data && data.id },
+  };
+  if (!data || data.vibrate !== false) options.vibrate = [480, 160, 480, 160, 480, 160, 720];
+  return self.registration.showNotification(title || "20分たちました", options);
 }
+
+async function deliverPush(data) {
+  if (!data || typeof data.id !== "string") return;
+  let bookmark = null;
+  let failed = false;
+  try {
+    bookmark = await readBookmark();
+  } catch {
+    failed = true;
+  }
+  if (!failed && (!bookmark || bookmark.id !== data.id)) return;
+  const open = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  const visible = open.filter((client) => client.visibilityState === "visible");
+  if (visible.length) {
+    visible.forEach((client) => client.postMessage({ type: "due" }));
+    return;
+  }
+  await showAlarm(data.title, data.body, data);
+}
+
+self.addEventListener("push", (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch {
+    data = {};
+  }
+  event.waitUntil(deliverPush(data));
+});
 
 self.addEventListener("message", (event) => {
   const data = event.data || {};
+  if (data.type === "bookmark" && typeof data.id === "string") {
+    event.waitUntil(writeBookmark(data.id, data.at));
+    return;
+  }
   if (data.type === "disarm") {
     clearAlarmTimer();
+    event.waitUntil(clearBookmark());
     return;
   }
   if (data.type !== "arm" || typeof data.at !== "number") return;

@@ -1,4 +1,9 @@
 {
+  "functions": {
+    "api/alarm.js": {
+      "maxDuration": 300
+    }
+  },
   "headers": [
     {
       "source": "/manifest.webmanifest",
