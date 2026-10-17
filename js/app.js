@@ -126,6 +126,10 @@ let deadlineTimer = 0;
 let alarmTimer = 0;
 let alarmNodes = [];
 let alarmHeard = false;
+let alarmAudio = null;
+let alarmUrl = "";
+let silentUrl = "";
+let soundGen = 0;
 let endArm = 0;
 let endTimer = 0;
 let audioCtx = null;
@@ -140,6 +144,9 @@ let inertOn = false;
 
 function workMs() {
   return settings.practice ? 30000 : 20 * 60 * 1000;
+}
+function alarmLabel() {
+  return settings.practice ? "30秒たちました" : "20分たちました";
 }
 function blinkEvery() {
   return settings.practice ? 7000 : 4 * 60 * 1000;
@@ -229,6 +236,74 @@ function prime() {
   if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
 }
 
+function wavUrl(samples, rate) {
+  const bytes = samples.length * 2;
+  const buffer = new ArrayBuffer(44 + bytes);
+  const view = new DataView(buffer);
+  const write = (offset, text) => {
+    for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i));
+  };
+  write(0, "RIFF");
+  view.setUint32(4, 36 + bytes, true);
+  write(8, "WAVE");
+  write(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, rate, true);
+  view.setUint32(28, rate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  write(36, "data");
+  view.setUint32(40, bytes, true);
+  let offset = 44;
+  for (let i = 0; i < samples.length; i += 1) {
+    view.setInt16(offset, samples[i], true);
+    offset += 2;
+  }
+  return URL.createObjectURL(new Blob([buffer], { type: "audio/wav" }));
+}
+
+function ensureAlarmAudio() {
+  if (alarmAudio) return alarmAudio;
+  alarmAudio = document.createElement("audio");
+  alarmAudio.setAttribute("playsinline", "");
+  alarmAudio.preload = "auto";
+  document.body.appendChild(alarmAudio);
+  return alarmAudio;
+}
+
+function unlockSound() {
+  prime();
+  const audio = ensureAlarmAudio();
+  if (!silentUrl) silentUrl = wavUrl(new Int16Array(2205), 22050);
+  const gen = ++soundGen;
+  audio.loop = false;
+  audio.src = silentUrl;
+  const played = audio.play();
+  if (played) {
+    played.then(() => {
+      if (gen === soundGen) audio.pause();
+    }).catch(() => {});
+  }
+}
+
+function alarmToneUrl() {
+  if (alarmUrl) return alarmUrl;
+  const rate = 22050;
+  const n = Math.floor(rate * 1.56);
+  const data = new Int16Array(n);
+  for (let i = 0; i < n; i += 1) {
+    const t = i / rate;
+    const step = t % 0.26;
+    const freq = Math.floor(t / 0.26) % 2 === 0 ? 880 : 659.25;
+    const env = Math.min(1, step / 0.015) * Math.max(0, 1 - Math.max(0, step - 0.02) / 0.22);
+    data[i] = Math.sin(2 * Math.PI * freq * t) * env * 26000;
+  }
+  alarmUrl = wavUrl(data, rate);
+  return alarmUrl;
+}
+
 function chime(kind) {
   if (!settings.sound || !audioCtx) return;
   const now = audioCtx.currentTime;
@@ -262,6 +337,10 @@ function swPost(message) {
 function stopAlarm() {
   clearTimeout(alarmTimer);
   alarmTimer = 0;
+  if (alarmAudio) {
+    alarmAudio.pause();
+    alarmAudio.loop = false;
+  }
   for (const node of alarmNodes) {
     try {
       node.stop();
@@ -270,6 +349,26 @@ function stopAlarm() {
     }
   }
   alarmNodes = [];
+}
+
+function playAlarmSound() {
+  if (!settings.sound) return;
+  const audio = ensureAlarmAudio();
+  soundGen += 1;
+  audio.loop = true;
+  audio.src = alarmToneUrl();
+  const played = audio.play();
+  if (played) {
+    played.then(() => {
+      alarmHeard = true;
+    }).catch(() => startAlarmLoop());
+  } else {
+    startAlarmLoop();
+  }
+  clearTimeout(alarmTimer);
+  alarmTimer = setTimeout(() => {
+    if (alarmAudio && session.phase === "due") alarmAudio.loop = false;
+  }, 10000);
 }
 
 function alarmBurst() {
@@ -310,10 +409,8 @@ function startAlarmLoop() {
 
 function ringAlarm() {
   buzz([200, 100, 200, 100, 200, 100, 420]);
-  startAlarmLoop();
-  if (!document.hidden) {
-    ping("20分たちました", "6メートル先を、20秒。スタートを押してください。", "pinto-alarm");
-  }
+  playAlarmSound();
+  ping(alarmLabel(), "6メートル先を、20秒。スタートを押してください。", "pinto-alarm");
 }
 
 function armClock() {
@@ -327,7 +424,7 @@ function armClock() {
   deadlineTimer = setTimeout(() => {
     if (session.phase === "working") enterDue();
   }, delay);
-  swPost({ type: "arm", at: session.phaseEndsAt });
+  swPost({ type: "arm", at: session.phaseEndsAt, title: alarmLabel() });
 }
 
 function hush() {
@@ -506,6 +603,7 @@ function startSession() {
   endArm = 0;
   alarmHeard = false;
   stopAlarm();
+  unlockSound();
   save();
   ensureTick();
   armClock();
@@ -531,6 +629,7 @@ function resumeSession() {
   session.phaseEndsAt = now + session.remain;
   session.nextBlinkAt = now + session.pausedBlinkIn;
   session.nextPostureAt = now + session.pausedPostureIn;
+  unlockSound();
   save();
   ensureTick();
   armClock();
@@ -593,7 +692,7 @@ function enterDue() {
   session.nextPostureAt = Math.max(session.nextPostureAt, now + postureEvery());
   closeTransient();
   save();
-  if (!document.hidden) swPost({ type: "disarm" });
+  swPost({ type: "disarm" });
   alarmHeard = false;
   ringAlarm();
   render();
@@ -760,13 +859,15 @@ function renderHero() {
 
   if (session.phase === "working") {
     const remain = Math.max(0, session.phaseEndsAt - now);
-    kicker = settings.practice ? "練習 · つぎのリセット" : "つぎのリセット";
+    kicker = settings.practice ? "練習 · アラームまで" : "つぎのリセット";
     time = fmt(remain);
-    sub = HINTS[Math.floor(now / 8000) % HINTS.length];
+    sub = settings.practice ? "30秒で、アラームが鳴ります" : HINTS[Math.floor(now / 8000) % HINTS.length];
     meta = `まばたき ${fmt(session.nextBlinkAt - now)} · 姿勢 ${fmt(session.nextPostureAt - now)}`;
     if (heat.phase === "run") meta = `温熱 ${fmt(heat.endsAt - now)} · ${meta}`;
     ratio = session.duration ? remain / session.duration : 0;
-    status = `画面時間を計測中。次のリセットまで約${Math.max(1, Math.ceil(remain / 60000))}分です。`;
+    status = settings.practice
+      ? "練習中です。30秒でアラームが鳴ります。"
+      : `画面時間を計測中。次のリセットまで約${Math.max(1, Math.ceil(remain / 60000))}分です。`;
   } else if (session.phase === "paused") {
     kicker = "一時停止";
     time = fmt(session.remain);
@@ -774,15 +875,16 @@ function renderHero() {
     ratio = session.duration ? session.remain / session.duration : 0;
     status = "一時停止中です。";
   } else if (session.phase === "due") {
-    kicker = "20分たちました";
+    kicker = alarmLabel();
     time = "20";
     sub = "スタートを押すと、はじまります";
     ratio = 1;
-    status = "20分たちました。スタートを押すと、6メートル先を20秒見ます。";
+    status = `${alarmLabel()}。スタートを押すと、6メートル先を20秒見ます。`;
   } else if (settings.practice) {
     kicker = "練習";
-    sub = "20秒で、リセットが来ます";
+    sub = "30秒で、アラームが鳴ります";
     time = fmt(workMs());
+    status = "練習です。スタートすると30秒でアラームが鳴ります。";
   }
 
   setText(el.heroKicker, kicker);
@@ -799,7 +901,10 @@ function renderHero() {
   el.startBtn.hidden = !showStart;
   el.runActions.hidden = session.phase !== "working" && session.phase !== "paused";
   el.quickRow.hidden = session.phase === "due";
-  setText(el.startBtn, session.phase === "due" ? "スタート" : "画面を見はじめる");
+  setText(
+    el.startBtn,
+    session.phase === "due" ? "スタート" : settings.practice ? "30秒ではじめる" : "画面を見はじめる"
+  );
   setText(el.pauseBtn, session.phase === "paused" ? "つづける" : "一時停止");
   setText(el.endBtn, Date.now() < endArm ? "本当に終わる" : "終わる");
 
@@ -856,7 +961,7 @@ function renderChrome() {
   el.miniBar.hidden = !showMini;
   if (showMini) {
     if (session.phase === "due") {
-      setText(el.miniLabel, "20分たちました");
+      setText(el.miniLabel, alarmLabel());
       setText(el.miniTime, "スタート");
     } else if (session.phase === "paused") {
       setText(el.miniLabel, "一時停止");
@@ -868,7 +973,7 @@ function renderChrome() {
   }
   let title = "ピント — 20分ごとに、目をほどく";
   if (session.phase === "working") title = `${fmt(session.phaseEndsAt - Date.now())} · ピント`;
-  else if (session.phase === "due") title = "20分たちました · ピント";
+  else if (session.phase === "due") title = `${alarmLabel()} · ピント`;
   else if (session.phase === "look") title = "画面を見ない · ピント";
   else if (session.phase === "paused") title = "一時停止 · ピント";
   else if (session.phase === "look-done") title = "ほどけた · ピント";
@@ -1097,7 +1202,21 @@ function bind() {
   bindSettings(el.setSound, "sound");
   bindSettings(el.setSpeech, "speech");
   bindSettings(el.setVibrate, "vibrate");
-  bindSettings(el.setPractice, "practice");
+  el.setPractice.addEventListener("change", () => {
+    settings.practice = el.setPractice.checked;
+    if (session.phase === "working") {
+      const span = workMs();
+      session.duration = span;
+      session.remain = span;
+      session.phaseEndsAt = Date.now() + span;
+      armClock();
+    } else if (session.phase === "paused") {
+      session.duration = workMs();
+      session.remain = workMs();
+    }
+    save();
+    render();
+  });
   el.notifyBtn.addEventListener("click", async () => {
     prime();
     if (!("Notification" in window) || Notification.permission !== "default") return;
@@ -1231,7 +1350,7 @@ function bind() {
   document.addEventListener("visibilitychange", onVisible);
   window.addEventListener("focus", onVisible);
   window.addEventListener("pagehide", () => {
-    if (session.phase === "working") swPost({ type: "arm", at: session.phaseEndsAt });
+    if (session.phase === "working") swPost({ type: "arm", at: session.phaseEndsAt, title: alarmLabel() });
   });
   window.addEventListener("beforeinstallprompt", (event) => {
     event.preventDefault();

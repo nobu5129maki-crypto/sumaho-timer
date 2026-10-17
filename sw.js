@@ -1,4 +1,4 @@
-const CACHE = "pinto-v6";
+const CACHE = "pinto-v7";
 const ASSETS = [
   "./",
   "./index.html",
@@ -53,8 +53,8 @@ function clearAlarmTimer() {
   releaseAlarm = () => {};
 }
 
-function showAlarm() {
-  return self.registration.showNotification("20分たちました", {
+function showAlarm(title) {
+  return self.registration.showNotification(title || "20分たちました", {
     body: "6メートル先を、20秒。スタートを押してください。",
     icon: "./icon-192.png",
     badge: "./icon-192.png",
@@ -77,6 +77,7 @@ self.addEventListener("message", (event) => {
   if (data.type !== "arm" || typeof data.at !== "number") return;
   clearAlarmTimer();
   const delay = Math.max(0, data.at - Date.now());
+  const title = data.title;
   const pending = new Promise((resolve) => {
     releaseAlarm = resolve;
     alarmTimer = setTimeout(async () => {
@@ -85,7 +86,7 @@ self.addEventListener("message", (event) => {
       try {
         const open = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
         const visible = open.some((client) => client.visibilityState === "visible");
-        if (!visible) await showAlarm();
+        if (!visible) await showAlarm(title);
       } catch {
         /* 通知が出せなくても、画面を開いたときに鳴らす */
       }
