@@ -122,6 +122,10 @@ const heat = { phase: "idle", endsAt: 0, duration: 5 * 60 * 1000 };
 
 let view = "now";
 let tid = 0;
+let deadlineTimer = 0;
+let alarmTimer = 0;
+let alarmNodes = [];
+let alarmHeard = false;
 let endArm = 0;
 let endTimer = 0;
 let audioCtx = null;
@@ -245,6 +249,87 @@ function chime(kind) {
   });
 }
 
+function swPost(message) {
+  if (!("serviceWorker" in navigator)) return;
+  const post = (reg) => {
+    const worker = navigator.serviceWorker.controller || reg?.active;
+    worker?.postMessage(message);
+  };
+  if (navigator.serviceWorker.controller) post();
+  else navigator.serviceWorker.ready.then(post).catch(() => {});
+}
+
+function stopAlarm() {
+  clearTimeout(alarmTimer);
+  alarmTimer = 0;
+  for (const node of alarmNodes) {
+    try {
+      node.stop();
+    } catch {
+      /* すでに止まっている */
+    }
+  }
+  alarmNodes = [];
+}
+
+function alarmBurst() {
+  if (!settings.sound) return false;
+  prime();
+  if (!audioCtx || audioCtx.state !== "running") return false;
+  const now = audioCtx.currentTime;
+  [880, 659.25, 880, 659.25, 880, 659.25].forEach((freq, i) => {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = "triangle";
+    osc.frequency.value = freq;
+    const t = now + i * 0.26;
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.16, t + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start(t);
+    osc.stop(t + 0.22);
+    alarmNodes.push(osc);
+  });
+  return true;
+}
+
+function startAlarmLoop() {
+  if (alarmHeard || !settings.sound) return;
+  stopAlarm();
+  let left = 6;
+  const ring = () => {
+    if (session.phase !== "due") return;
+    if (alarmBurst()) alarmHeard = true;
+    left -= 1;
+    if (left > 0 && session.phase === "due") alarmTimer = setTimeout(ring, 2400);
+  };
+  ring();
+}
+
+function ringAlarm() {
+  buzz([200, 100, 200, 100, 200, 100, 420]);
+  startAlarmLoop();
+  if (!document.hidden) {
+    ping("20分たちました", "6メートル先を、20秒。スタートを押してください。", "pinto-alarm");
+  }
+}
+
+function armClock() {
+  clearTimeout(deadlineTimer);
+  deadlineTimer = 0;
+  if (session.phase !== "working") {
+    swPost({ type: "disarm" });
+    return;
+  }
+  const delay = Math.max(0, session.phaseEndsAt - Date.now());
+  deadlineTimer = setTimeout(() => {
+    if (session.phase === "working") enterDue();
+  }, delay);
+  swPost({ type: "arm", at: session.phaseEndsAt });
+}
+
 function hush() {
   clearTimeout(speakTimer);
   if ("speechSynthesis" in window) speechSynthesis.cancel();
@@ -275,17 +360,20 @@ function buzz(pattern) {
   navigator.vibrate(pattern);
 }
 
-async function ping(title, body) {
+async function ping(title, body, tag = "pinto") {
   if (!("Notification" in window) || Notification.permission !== "granted") return;
+  const alarm = tag === "pinto-alarm";
   const options = {
     body,
     icon: "./icon-192.png",
-    tag: "pinto",
+    badge: "./icon-192.png",
+    tag,
     renotify: true,
     lang: "ja",
     silent: false,
+    requireInteraction: alarm,
   };
-  if (settings.vibrate) options.vibrate = [40, 60, 40];
+  if (settings.vibrate) options.vibrate = alarm ? [200, 100, 200, 100, 200, 100, 420] : [40, 60, 40];
   try {
     const reg = await navigator.serviceWorker?.getRegistration();
     if (reg) {
@@ -416,8 +504,11 @@ function startSession() {
   session.nextPostureAt = now + postureEvery();
   session.resumeAfter = false;
   endArm = 0;
+  alarmHeard = false;
+  stopAlarm();
   save();
   ensureTick();
+  armClock();
   render();
 }
 
@@ -428,7 +519,9 @@ function pauseSession() {
   session.pausedPostureIn = Math.max(0, session.nextPostureAt - now);
   session.phase = "paused";
   closeTransient();
+  stopAlarm();
   save();
+  armClock();
   render();
 }
 
@@ -440,16 +533,20 @@ function resumeSession() {
   session.nextPostureAt = now + session.pausedPostureIn;
   save();
   ensureTick();
+  armClock();
   render();
 }
 
 function endSession() {
   hush();
+  stopAlarm();
+  alarmHeard = false;
   session.phase = "idle";
   endArm = 0;
   clearTimeout(endTimer);
   closeTransient();
   save();
+  armClock();
   syncWake();
   render();
 }
@@ -459,6 +556,9 @@ function beginLook() {
   if (el.settingsDialog.open) el.settingsDialog.close();
   session.resumeAfter = session.phase === "working" || session.phase === "paused" || session.phase === "due";
   hush();
+  stopAlarm();
+  alarmHeard = false;
+  swPost({ type: "disarm" });
   closeTransient();
   session.phase = "look";
   session.duration = LOOK_MS;
@@ -484,6 +584,8 @@ function beginLook() {
 
 function enterDue() {
   if (session.phase === "due") return;
+  clearTimeout(deadlineTimer);
+  deadlineTimer = 0;
   const now = Date.now();
   session.phase = "due";
   session.resumeAfter = true;
@@ -491,8 +593,9 @@ function enterDue() {
   session.nextPostureAt = Math.max(session.nextPostureAt, now + postureEvery());
   closeTransient();
   save();
-  buzz([70, 40, 70]);
-  ping("6メートル先へ", "20秒、ぼんやり見てください");
+  if (!document.hidden) swPost({ type: "disarm" });
+  alarmHeard = false;
+  ringAlarm();
   render();
 }
 
@@ -563,8 +666,7 @@ function shouldRun() {
 function tick() {
   const now = Date.now();
   if (session.phase === "working" && now >= session.phaseEndsAt) {
-    if (document.hidden) enterDue();
-    else beginLook();
+    enterDue();
     return;
   }
   if (session.phase === "look" && now >= session.phaseEndsAt) {
@@ -673,10 +775,10 @@ function renderHero() {
     status = "一時停止中です。";
   } else if (session.phase === "due") {
     kicker = "20分たちました";
-    time = "0:20";
-    sub = "6メートル先を、ぼんやり";
+    time = "20";
+    sub = "スタートを押すと、はじまります";
     ratio = 1;
-    status = "20分たちました。6メートル先を20秒見てください。";
+    status = "20分たちました。スタートを押すと、6メートル先を20秒見ます。";
   } else if (settings.practice) {
     kicker = "練習";
     sub = "20秒で、リセットが来ます";
@@ -697,7 +799,7 @@ function renderHero() {
   el.startBtn.hidden = !showStart;
   el.runActions.hidden = session.phase !== "working" && session.phase !== "paused";
   el.quickRow.hidden = session.phase === "due";
-  setText(el.startBtn, session.phase === "due" ? "目を離してはじめる" : "画面を見はじめる");
+  setText(el.startBtn, session.phase === "due" ? "スタート" : "画面を見はじめる");
   setText(el.pauseBtn, session.phase === "paused" ? "つづける" : "一時停止");
   setText(el.endBtn, Date.now() < endArm ? "本当に終わる" : "終わる");
 
@@ -754,8 +856,8 @@ function renderChrome() {
   el.miniBar.hidden = !showMini;
   if (showMini) {
     if (session.phase === "due") {
-      setText(el.miniLabel, "目を休める時間");
-      setText(el.miniTime, "0:20");
+      setText(el.miniLabel, "20分たちました");
+      setText(el.miniTime, "スタート");
     } else if (session.phase === "paused") {
       setText(el.miniLabel, "一時停止");
       setText(el.miniTime, fmt(session.remain));
@@ -766,7 +868,7 @@ function renderChrome() {
   }
   let title = "ピント — 20分ごとに、目をほどく";
   if (session.phase === "working") title = `${fmt(session.phaseEndsAt - Date.now())} · ピント`;
-  else if (session.phase === "due") title = "目を休める · ピント";
+  else if (session.phase === "due") title = "20分たちました · ピント";
   else if (session.phase === "look") title = "画面を見ない · ピント";
   else if (session.phase === "paused") title = "一時停止 · ピント";
   else if (session.phase === "look-done") title = "ほどけた · ピント";
@@ -963,13 +1065,16 @@ function bindSettings(input, key) {
 
 function reconcile() {
   const now = Date.now();
-  if (session.phase === "working" && session.phaseEndsAt <= now) session.phase = "due";
+  if (session.phase === "working" && session.phaseEndsAt <= now) enterDue();
+  else if (session.phase === "due") ringAlarm();
   if (session.phase === "look" && session.phaseEndsAt <= now) completeLook({ quiet: true });
   if (heat.phase === "run" && heat.endsAt <= now) completeHeat({ quiet: true });
 }
 
 function onVisible() {
   if (document.hidden) return;
+  if (session.phase === "working" && Date.now() >= session.phaseEndsAt) enterDue();
+  else if (session.phase === "due") startAlarmLoop();
   if (posturePending && session.phase === "working") openPosture();
   if (session.phase === "look" || heat.phase === "run") syncWake();
   tick();
@@ -1125,6 +1230,9 @@ function bind() {
   });
   document.addEventListener("visibilitychange", onVisible);
   window.addEventListener("focus", onVisible);
+  window.addEventListener("pagehide", () => {
+    if (session.phase === "working") swPost({ type: "arm", at: session.phaseEndsAt });
+  });
   window.addEventListener("beforeinstallprompt", (event) => {
     event.preventDefault();
     deferredPrompt = event;
@@ -1148,6 +1256,9 @@ reconcile();
 render();
 syncWake();
 if (shouldRun()) ensureTick();
+if (session.phase === "working") armClock();
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("./sw.js", { scope: "./" }).catch(() => {});
+  navigator.serviceWorker.register("./sw.js", { scope: "./" }).then(() => {
+    if (session.phase === "working") armClock();
+  }).catch(() => {});
 }

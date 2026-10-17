@@ -1,4 +1,4 @@
-const CACHE = "pinto-v5";
+const CACHE = "pinto-v6";
 const ASSETS = [
   "./",
   "./index.html",
@@ -41,6 +41,58 @@ self.addEventListener("fetch", (event) => {
       return cached || network;
     })()
   );
+});
+
+let alarmTimer = 0;
+let releaseAlarm = () => {};
+
+function clearAlarmTimer() {
+  clearTimeout(alarmTimer);
+  alarmTimer = 0;
+  releaseAlarm();
+  releaseAlarm = () => {};
+}
+
+function showAlarm() {
+  return self.registration.showNotification("20分たちました", {
+    body: "6メートル先を、20秒。スタートを押してください。",
+    icon: "./icon-192.png",
+    badge: "./icon-192.png",
+    tag: "pinto-alarm",
+    renotify: true,
+    lang: "ja",
+    silent: false,
+    requireInteraction: true,
+    vibrate: [200, 100, 200, 100, 200, 100, 420],
+    data: { url: "./" },
+  });
+}
+
+self.addEventListener("message", (event) => {
+  const data = event.data || {};
+  if (data.type === "disarm") {
+    clearAlarmTimer();
+    return;
+  }
+  if (data.type !== "arm" || typeof data.at !== "number") return;
+  clearAlarmTimer();
+  const delay = Math.max(0, data.at - Date.now());
+  const pending = new Promise((resolve) => {
+    releaseAlarm = resolve;
+    alarmTimer = setTimeout(async () => {
+      alarmTimer = 0;
+      releaseAlarm = () => {};
+      try {
+        const open = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+        const visible = open.some((client) => client.visibilityState === "visible");
+        if (!visible) await showAlarm();
+      } catch {
+        /* 通知が出せなくても、画面を開いたときに鳴らす */
+      }
+      resolve();
+    }, delay);
+  });
+  event.waitUntil(pending);
 });
 
 self.addEventListener("notificationclick", (event) => {
