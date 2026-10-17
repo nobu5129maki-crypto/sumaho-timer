@@ -84,6 +84,15 @@ const el = {
   setPractice: $("setPractice"),
   notifyBtn: $("notifyBtn"),
   installBtn: $("installBtn"),
+  installNote: $("installNote"),
+  installCard: $("installCard"),
+  installOpen: $("installOpen"),
+  installDismiss: $("installDismiss"),
+  installSheet: $("installSheet"),
+  installLead: $("installLead"),
+  installSteps: $("installSteps"),
+  installLater: $("installLater"),
+  installNow: $("installNow"),
   settingsClose: $("settingsClose"),
   liveStatus: $("liveStatus"),
   themeColor: $("themeColor"),
@@ -95,6 +104,7 @@ const settings = {
   vibrate: true,
   practice: false,
   onboarded: false,
+  installDismissed: false,
 };
 const stats = { days: {} };
 const session = {
@@ -332,6 +342,8 @@ function closeTransient() {
   el.postureSheet.classList.remove("is-on");
   el.blinkSheet.hidden = true;
   el.blinkSheet.classList.remove("is-on");
+  el.installSheet.hidden = true;
+  el.installSheet.classList.remove("is-on");
   el.backdrop.hidden = true;
   el.backdrop.classList.remove("is-on");
   posturePending = false;
@@ -761,6 +773,125 @@ function renderChrome() {
   if (document.title !== title) document.title = title;
 }
 
+function isStandalone() {
+  return window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+}
+
+function deviceKind() {
+  const ua = navigator.userAgent || "";
+  const ios = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const android = /Android/i.test(ua);
+  const inApp = /Line\/|Instagram|FBAN|FBAV|FB_IAB|Twitter|MicroMessenger|Snapchat/i.test(ua) || /; wv\)/.test(ua);
+  const iosOther = ios && /CriOS|FxiOS|EdgiOS|OPiOS|DuckDuckGo|GSA\//.test(ua);
+  return { ios, android, inApp, iosOther };
+}
+
+function setSteps(items) {
+  el.installSteps.replaceChildren();
+  for (const [n, text] of items) {
+    const li = document.createElement("li");
+    const span = document.createElement("span");
+    span.textContent = n;
+    li.append(span, document.createTextNode(text));
+    el.installSteps.append(li);
+  }
+}
+
+function wantsInstallBar() {
+  if (!settings.onboarded || settings.installDismissed || isStandalone()) return false;
+  const narrow = window.matchMedia("(max-width: 979px)").matches;
+  const coarse = window.matchMedia("(pointer: coarse)").matches;
+  const { ios, android } = deviceKind();
+  return narrow || coarse || ios || android;
+}
+
+function renderInstall() {
+  const installed = isStandalone();
+  el.installCard.hidden = !wantsInstallBar();
+  el.installBtn.hidden = installed;
+  if (installed) {
+    setText(el.installNote, "ホーム画面から開いています。記録はこの端末の中だけに残ります。");
+    return;
+  }
+  setText(el.installBtn, deferredPrompt ? "アプリとして追加" : "ホーム画面に追加");
+  setText(
+    el.installNote,
+    "ホーム画面に追加すると、アプリとして開き、ほかの画面にいても20分の合図が届きやすくなります。記録はこの端末の中だけに残ります。"
+  );
+}
+
+function fillInstallGuide() {
+  const { ios, android, inApp, iosOther } = deviceKind();
+  el.installNow.hidden = true;
+  el.installSteps.hidden = false;
+  if (inApp || iosOther) {
+    setText(el.installLead, "この画面では追加できません。下のリンクをコピーし、Safariで開いてからホーム画面に追加してください。");
+    el.installSteps.hidden = true;
+    setSteps([]);
+    el.installNow.hidden = false;
+    el.installNow.dataset.action = "copy";
+    setText(el.installNow, "リンクをコピー");
+    return;
+  }
+  if (ios) {
+    setText(el.installLead, "Safariの共有から、ホーム画面に追加します。追加したアイコンから開くと、アプリとして動きます。");
+    setSteps([
+      ["01", "画面下の共有ボタン（四角から上向きの矢印）をタップ"],
+      ["02", "「ホーム画面に追加」を選ぶ"],
+      ["03", "右上の「追加」をタップ"],
+    ]);
+    return;
+  }
+  if (deferredPrompt) {
+    setText(el.installLead, "この端末のアプリとして追加します。ホーム画面のアイコンから開けます。");
+    el.installSteps.hidden = true;
+    setSteps([]);
+    el.installNow.hidden = false;
+    el.installNow.dataset.action = "prompt";
+    setText(el.installNow, "追加する");
+    return;
+  }
+  setText(
+    el.installLead,
+    android
+      ? "ブラウザのメニューから、アプリとして追加できます。"
+      : "ブラウザのメニューから、インストールできます。"
+  );
+  setSteps(
+    android
+      ? [
+          ["01", "右上のメニュー（︙）を開く"],
+          ["02", "「アプリをインストール」または「ホーム画面に追加」を選ぶ"],
+          ["03", "「インストール」をタップ"],
+        ]
+      : [
+          ["01", "アドレスバー右のインストールアイコン、またはメニューを開く"],
+          ["02", "「ピントをインストール」を選ぶ"],
+        ]
+  );
+}
+
+async function offerInstall() {
+  if (el.settingsDialog.open) el.settingsDialog.close();
+  if (deferredPrompt) {
+    try {
+      deferredPrompt.prompt();
+      const choice = await deferredPrompt.userChoice;
+      deferredPrompt = null;
+      if (choice.outcome === "accepted") settings.installDismissed = true;
+      save();
+      renderInstall();
+      return;
+    } catch {
+      deferredPrompt = null;
+    }
+  }
+  fillInstallGuide();
+  openSheet(el.installSheet);
+  render();
+  (el.installNow.hidden ? el.installLater : el.installNow).focus();
+}
+
 function renderNotify() {
   if (!("Notification" in window)) {
     setText(el.notifyBtn, "このブラウザは通知に対応していません");
@@ -779,7 +910,11 @@ function render() {
   renderHeat();
   renderStats();
   renderChrome();
-  const sheetOn = el.postureSheet.classList.contains("is-on") || el.blinkSheet.classList.contains("is-on");
+  renderInstall();
+  const sheetOn =
+    el.postureSheet.classList.contains("is-on") ||
+    el.blinkSheet.classList.contains("is-on") ||
+    el.installSheet.classList.contains("is-on");
   const lookOn = session.phase === "look" || session.phase === "look-done";
   setInert(sheetOn || lookOn || !settings.onboarded);
 }
@@ -864,12 +999,41 @@ function bind() {
     await Notification.requestPermission();
     renderNotify();
   });
-  el.installBtn.addEventListener("click", async () => {
-    if (!deferredPrompt) return;
-    deferredPrompt.prompt();
-    await deferredPrompt.userChoice;
-    deferredPrompt = null;
-    el.installBtn.hidden = true;
+  el.installBtn.addEventListener("click", () => {
+    prime();
+    offerInstall();
+  });
+  el.installOpen.addEventListener("click", () => {
+    prime();
+    offerInstall();
+  });
+  el.installDismiss.addEventListener("click", () => {
+    settings.installDismissed = true;
+    save();
+    renderInstall();
+  });
+  el.installLater.addEventListener("click", () => {
+    closeTransient();
+    render();
+  });
+  el.installNow.addEventListener("click", async () => {
+    if (el.installNow.dataset.action === "copy") {
+      const url = `${location.origin}${location.pathname}`;
+      try {
+        await navigator.clipboard.writeText(url);
+        setText(el.installNow, "コピーしました");
+      } catch {
+        setText(el.installLead, url);
+      }
+      return;
+    }
+    if (el.installNow.dataset.action === "prompt") {
+      closeTransient();
+      await offerInstall();
+      return;
+    }
+    closeTransient();
+    render();
   });
   document.querySelectorAll(".nav button").forEach((btn) => {
     btn.addEventListener("click", () => showView(btn.dataset.view));
@@ -964,8 +1128,17 @@ function bind() {
   window.addEventListener("beforeinstallprompt", (event) => {
     event.preventDefault();
     deferredPrompt = event;
-    el.installBtn.hidden = false;
+    renderInstall();
   });
+  window.addEventListener("appinstalled", () => {
+    deferredPrompt = null;
+    settings.installDismissed = true;
+    save();
+    closeTransient();
+    render();
+  });
+  window.matchMedia("(display-mode: standalone)").addEventListener("change", render);
+  window.matchMedia("(max-width: 979px)").addEventListener("change", render);
 }
 
 loadStore();
@@ -976,5 +1149,5 @@ render();
 syncWake();
 if (shouldRun()) ensureTick();
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("./sw.js").catch(() => {});
+  navigator.serviceWorker.register("./sw.js", { scope: "./" }).catch(() => {});
 }

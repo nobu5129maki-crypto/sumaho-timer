@@ -6,12 +6,14 @@
   <meta name="theme-color" content="#F4EEE4" id="themeColor">
   <meta name="color-scheme" content="light">
   <meta name="description" content="20分ごとに6メートル先を20秒。スマホの見すぎから、目・姿勢・涙を守るタイマー。">
+  <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="ピント">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <title>ピント — 20分ごとに、目をほどく</title>
   <link rel="icon" href="./favicon-32.png" type="image/png" sizes="32x32">
   <link rel="icon" href="./icon-192.png" type="image/png" sizes="192x192">
-  <link rel="apple-touch-icon" href="./apple-touch-icon.png">
+  <link rel="apple-touch-icon" href="./apple-touch-icon.png" sizes="180x180">
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -67,6 +69,19 @@
 
     <main class="main">
       <section class="view is-on" id="viewNow" aria-label="いま">
+        <div class="install-bar" id="installCard" hidden>
+          <button type="button" class="install-open" id="installOpen">
+            <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+              <circle cx="16" cy="16" r="10" fill="none" stroke="currentColor" stroke-width="1.6"/>
+              <circle cx="16" cy="16" r="2.2"/>
+            </svg>
+            <span>
+              <strong>ホーム画面に追加</strong>
+              <small>アプリとして開くと、20分の合図が届きます</small>
+            </span>
+          </button>
+          <button type="button" class="install-x" id="installDismiss" aria-label="あとで">×</button>
+        </div>
         <p class="kicker" id="heroKicker">20-20-20</p>
         <div class="hero" id="hero">
           <svg class="ring" viewBox="0 0 120 120" aria-hidden="true">
@@ -283,6 +298,17 @@
     </div>
   </section>
 
+  <section class="sheet" id="installSheet" role="dialog" aria-modal="true" aria-labelledby="installTitle" hidden>
+    <p class="kicker">ホーム画面</p>
+    <h3 id="installTitle">アプリにする</h3>
+    <p class="lead" id="installLead">ホーム画面に追加すると、ほかのアプリと同じように開けます。</p>
+    <ol class="steps" id="installSteps"></ol>
+    <div class="sheet-actions">
+      <button class="btn-line" id="installLater" type="button">閉じる</button>
+      <button class="btn-primary" id="installNow" type="button" hidden>追加する</button>
+    </div>
+  </section>
+
   <section class="sheet" id="postureSheet" role="dialog" aria-modal="true" aria-labelledby="postureTitle" hidden>
     <p class="kicker">頭頸部</p>
     <h3 id="postureTitle">目線まで、上げる</h3>
@@ -325,10 +351,10 @@
       </label>
       <div class="dialog-links">
         <button type="button" id="notifyBtn">通知を許可する</button>
-        <button type="button" id="installBtn" hidden>ホーム画面に追加</button>
+        <button type="button" id="installBtn">ホーム画面に追加</button>
         <button type="button" id="settingsClose">閉じる</button>
       </div>
-      <p class="note">ホーム画面に追加すると、他のアプリに移っても知らせやすくなります。記録はこの端末の中だけに残ります。</p>
+      <p class="note" id="installNote">ホーム画面に追加すると、アプリとして開き、ほかの画面にいても20分の合図が届きやすくなります。記録はこの端末の中だけに残ります。</p>
     </div>
   </dialog>
 

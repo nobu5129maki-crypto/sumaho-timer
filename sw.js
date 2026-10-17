@@ -1,4 +1,4 @@
-const CACHE = "pinto-v4";
+const CACHE = "pinto-v5";
 const ASSETS = [
   "./",
   "./index.html",
