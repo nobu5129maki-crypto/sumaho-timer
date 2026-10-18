@@ -3,6 +3,7 @@ const webpush = require("web-push");
 const MAX_AHEAD_MS = 25 * 60 * 1000;
 const HOP_MS = 200 * 1000;
 const RING_LEAD_MS = 40 * 1000;
+const BUDGET_MS = 240 * 1000;
 const RING_GAP_MS = 10 * 1000;
 const RING_COUNT = 8;
 const MAX_HOPS = 10;
@@ -93,8 +94,8 @@ function normalize(body, internal) {
   if (hops < 0 || hops > MAX_HOPS || (!internal && hops !== 0)) return null;
   if (!internal && Number.isFinite(phoneNow)) {
     const delay = fireAt - phoneNow;
-    if (!Number.isFinite(delay) || delay > MAX_AHEAD_MS || delay < -2 * 60 * 1000) return null;
-    if (Math.abs(Date.now() - phoneNow) > 15000) fireAt = Date.now() + delay;
+    if (!Number.isFinite(delay) || delay > MAX_AHEAD_MS || delay < 5000) return null;
+    fireAt = Date.now() + delay;
   }
   const skew = fireAt - Date.now();
   if (skew > MAX_AHEAD_MS || skew < -2 * 60 * 1000) return null;
@@ -197,21 +198,57 @@ async function ring(job) {
   }
 }
 
-async function run(job) {
-  const step = nextStep(job.fireAt - Date.now());
-  console.log("pinto step", job.hops, step.chain ? "chain" : "ring", Math.round((job.fireAt - Date.now()) / 1000));
-  if (step.chain && job.hops < MAX_HOPS) {
-    await sleep(step.sleepMs);
-    try {
-      await chain(job);
-      return;
-    } catch {
-      if (job.fireAt - Date.now() > 90 * 1000) return;
-    }
-  } else if (step.sleepMs > 0) {
-    await sleep(Math.min(step.sleepMs, RING_LEAD_MS + 5000));
+function canRing(now, fireAt) {
+  return now >= fireAt;
+}
+
+function decide(now, job, startedAt) {
+  const remain = job.fireAt - now;
+  if (remain <= 0) return { action: "ring", sleepMs: 0 };
+  const used = now - startedAt;
+  const budgetLeft = BUDGET_MS - used;
+  if (used > 160 * 1000 || budgetLeft < 20 * 1000) {
+    if (job.hops >= MAX_HOPS) return { action: "drop" };
+    return { action: "chain" };
   }
-  await ring(job);
+  const slice = Math.min(remain, HOP_MS, Math.max(1000, budgetLeft - 20 * 1000));
+  return { action: "sleep", sleepMs: slice };
+}
+
+async function run(job) {
+  const startedAt = Date.now();
+  for (let steps = 0; steps < 12; steps += 1) {
+    const choice = decide(Date.now(), job, startedAt);
+    console.log("pinto step", job.hops, choice.action, Math.round((job.fireAt - Date.now()) / 1000));
+    if (choice.action === "drop") return;
+    if (choice.action === "chain") {
+      try {
+        await chain(job);
+      } catch (error) {
+        console.log("pinto chain fail", job.hops, error && error.message);
+      }
+      return;
+    }
+    if (choice.action === "ring") {
+      if (choice.sleepMs > 0) await sleep(choice.sleepMs);
+      if (!canRing(Date.now(), job.fireAt)) return;
+      await ring(job);
+      return;
+    }
+    const before = Date.now();
+    await sleep(choice.sleepMs);
+    if (choice.sleepMs > 5000 && Date.now() - before < choice.sleepMs / 2) {
+      console.log("pinto sleep short", job.hops, Date.now() - before);
+      if (job.hops < MAX_HOPS) {
+        try {
+          await chain(job);
+        } catch (error) {
+          console.log("pinto chain fail", job.hops, error && error.message);
+        }
+      }
+      return;
+    }
+  }
 }
 
 module.exports = async function handler(req, res) {
@@ -276,3 +313,5 @@ module.exports = async function handler(req, res) {
 
 module.exports.nextStep = nextStep;
 module.exports.endpointAllowed = endpointAllowed;
+module.exports.canRing = canRing;
+module.exports.decide = decide;

@@ -1,4 +1,4 @@
-const CACHE = "pinto-v12";
+const CACHE = "pinto-v13";
 const ASSETS = [
   "./",
   "./index.html",
@@ -137,12 +137,38 @@ async function showAlarm(title, body, data) {
   });
 }
 
+const DUE_SLACK_MS = 800;
+
+function deadlineOf(data) {
+  const id = Number(data && data.id);
+  if (Number.isFinite(id) && id > 1e11) return id;
+  const at = Number(data && data.at);
+  if (Number.isFinite(at) && at > 1e11) return at;
+  return 0;
+}
+
+async function alarmAllowed(at) {
+  if (!Number.isFinite(at) || at < 1e11) return false;
+  if (Date.now() + DUE_SLACK_MS < at) return false;
+  try {
+    const mark = await readBookmark();
+    if (!mark || String(mark.id) !== String(at)) return false;
+    if (Number(mark.at) && Date.now() + DUE_SLACK_MS < Number(mark.at)) return false;
+  } catch {
+    return false;
+  }
+  return true;
+}
+
 async function deliverPush(data) {
+  const at = deadlineOf(data);
+  if (!(await alarmAllowed(at))) return;
   const title = data && data.title;
   const body = data && data.body;
   const open = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-  open.forEach((client) => client.postMessage({ type: "due" }));
+  open.forEach((client) => client.postMessage({ type: "due", id: String(at), at }));
   for (let i = 0; i < 8; i += 1) {
+    if (!(await alarmAllowed(at))) return;
     try {
       await showAlarm(title, body, data || {});
     } catch {
@@ -182,22 +208,36 @@ self.addEventListener("message", (event) => {
   }
   if (data.type !== "arm" || typeof data.at !== "number") return;
   clearAlarmTimer();
-  const delay = Math.max(0, data.at - Date.now());
+  const at = data.at;
   const title = data.title;
   const pending = new Promise((resolve) => {
-    releaseAlarm = resolve;
-    alarmTimer = setTimeout(async () => {
-      alarmTimer = 0;
-      releaseAlarm = () => {};
-      try {
-        const open = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-        open.forEach((client) => client.postMessage({ type: "due" }));
-        await showAlarm(title);
-      } catch {
-        /* 通知が出せなくても、画面を開いたときに鳴らす */
+    const watch = () => {
+      const remain = at - Date.now();
+      if (remain <= DUE_SLACK_MS) {
+        alarmAllowed(at)
+          .then(async (ok) => {
+            if (!ok) return;
+            const open = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+            open.forEach((client) => client.postMessage({ type: "due", id: String(at), at }));
+            await showAlarm(title);
+          })
+          .catch(() => {})
+          .finally(resolve);
+        return;
       }
-      resolve();
-    }, delay);
+      const armedAt = Date.now();
+      releaseAlarm = resolve;
+      alarmTimer = setTimeout(() => {
+        alarmTimer = 0;
+        releaseAlarm = () => {};
+        if (Date.now() + DUE_SLACK_MS < at && Date.now() - armedAt < 1000) {
+          resolve();
+          return;
+        }
+        watch();
+      }, remain);
+    };
+    watch();
   });
   event.waitUntil(pending);
 });

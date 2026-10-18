@@ -449,7 +449,8 @@ function disarmBackground() {
 }
 
 function scheduleLocalAlarm(at, title) {
-  if (typeof TimestampTrigger !== "function" || !("serviceWorker" in navigator)) return;
+  if (typeof TimestampTrigger !== "function" || !("Notification" in window) || !("showTrigger" in Notification.prototype)) return;
+  if (!("serviceWorker" in navigator) || Date.now() + 400 >= at) return;
   navigator.serviceWorker.ready
     .then((reg) =>
       reg.showNotification(title, {
@@ -608,6 +609,28 @@ function ringAlarm() {
   ping(alarmLabel(), "ストップを押すまで、音は続きます。", "pinto-alarm");
 }
 
+function armDeadline() {
+  clearTimeout(deadlineTimer);
+  deadlineTimer = 0;
+  if (session.phase !== "working") return;
+  const remain = session.phaseEndsAt - Date.now();
+  if (remain <= 400) {
+    enterDue();
+    return;
+  }
+  const armedAt = Date.now();
+  deadlineTimer = setTimeout(() => {
+    deadlineTimer = 0;
+    if (session.phase !== "working") return;
+    if (Date.now() + 400 >= session.phaseEndsAt) {
+      enterDue();
+      return;
+    }
+    if (Date.now() - armedAt < 1000) return;
+    armDeadline();
+  }, remain);
+}
+
 function armClock() {
   clearTimeout(deadlineTimer);
   deadlineTimer = 0;
@@ -615,10 +638,7 @@ function armClock() {
     disarmBackground();
     return;
   }
-  const delay = Math.max(0, session.phaseEndsAt - Date.now());
-  deadlineTimer = setTimeout(() => {
-    if (session.phase === "working") enterDue();
-  }, delay);
+  armDeadline();
   swPost({ type: "arm", at: session.phaseEndsAt, title: alarmLabel() });
   scheduleBackgroundAlarm();
 }
@@ -916,6 +936,10 @@ function beginLook() {
 
 function enterDue() {
   if (session.phase === "due") return;
+  if (session.phase === "working" && Date.now() + 400 < session.phaseEndsAt) {
+    armDeadline();
+    return;
+  }
   clearTimeout(deadlineTimer);
   deadlineTimer = 0;
   const now = Date.now();
@@ -1609,8 +1633,12 @@ function bind() {
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.addEventListener("message", (event) => {
       if (event.data && event.data.type === "due") {
-        if (session.phase === "working") enterDue();
-        else if (session.phase === "due" && !session.alarmSilenced) ringAlarm();
+        const id = event.data.id ? String(event.data.id) : "";
+        if (session.phase === "working") {
+          if (id && id !== String(session.phaseEndsAt)) return;
+          if (Date.now() + 400 < session.phaseEndsAt) return;
+          enterDue();
+        } else if (session.phase === "due" && !session.alarmSilenced) ringAlarm();
       }
     });
   }
